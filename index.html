@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Grid shape as an independent lever in 2–4-bit weight-only LLM quantization</title>
+<meta name="author" content="Roman S. Pokora"><style>
+@page { size: A4; margin: 22mm 20mm; }
+body { font-family: Georgia, 'Times New Roman', serif; font-size: 11.5pt; line-height: 1.55;
+       max-width: 46rem; margin: 2rem auto; padding: 0 1rem; color: #111; text-align: justify; }
+h1 { font-size: 16.5pt; text-align: center; line-height: 1.35; margin-bottom: .2em; }
+h2 { font-size: 13.5pt; margin-top: 1.7em; border-bottom: 1px solid #999; padding-bottom: 2px; }
+h3 { font-size: 12pt; margin-top: 1.2em; }
+.subtitle, .authors { text-align: center; font-size: 11pt; color: #444; margin: .1em 0; }
+.abstract { margin: 1.4em 2rem; font-size: 10.5pt; }
+.abstract h3 { margin: .8em 0 .2em; font-size: 10.5pt; text-transform: uppercase; }
+.kw { font-style: italic; }
+table { border-collapse: collapse; margin: .8em auto; font-size: 10pt; }
+th, td { border: 0; border-bottom: 1px solid #ddd; padding: 3px 10px; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+thead th { border-bottom: 1.6px solid #111; }
+.neg { color: #0a6b31; } .pos { color: #a01212; } .muted { color: #888; }
+.cap, figcaption { text-align: center; font-size: 9.5pt; font-style: italic; color: #333; margin: .2em 0 1.2em; }
+.formula { text-align: center; font-style: italic; margin: .9em 0; font-size: 12pt; }
+ol.refs { font-size: 9.5pt; padding-left: 1.4em; text-align: left; }
+ol.refs li { margin-bottom: .4em; }
+pre.algo { background: #f7f5f0; border: 1px solid #e2ded4; border-radius: 6px; padding: 10px 14px;
+           font: 9.5pt/1.5 ui-monospace, monospace; overflow-x: auto; text-align: left; }
+figure.fig { margin: 1.2em 0; text-align: center; }
+footer { margin-top: 3em; padding-top: .8em; border-top: 1px solid #ccc; font-size: 9pt; color: #666; }
+@media print { body { max-width: none; } }
+</style></head>
+<body>
+<h1>Grid shape as an independent lever in 2–4-bit weight-only LLM quantization<br>
+fitting non-uniform grids from the weight distribution and the Hessian</h1>
+<p class="authors">Roman S. Pokora · Independent researcher · Preprint, November 2026</p>
+
+<div class="abstract">
+<h3>Abstract</h3>
+<p>We study how the placement of quantization levels affects 2–4-bit weight-only
+quantization of large language models. At equal bit width, a grid fitted to the weight
+distribution and to channel saliency lowers perplexity more than the choice between
+uniform and fixed non-uniform alphabets. For each weight tensor we fit a
+2<sup>b</sup>-level lookup table with a four-parameter Kumaraswamy quantile function
+(one pair per half-distribution), optimized by compass search on a
+Hessian-diagonal-weighted squared error. The table costs 32 fp16 bytes per tensor,
+fitting takes under a second on CPU, and the decoder is unchanged. The procedure is
+deterministic: with the histogram objective the grid is an exact function of the
+tensor, with no random subsampling, training, or gradient computation. It changes the
+alphabet rather than the rounding rule, so it composes with GPTQ, rotation-based
+preconditioning, sparse corrections, and mixed-precision allocation. On SmolLM-135M
+and Qwen2.5-0.5B (WikiText-2, activation-based calibration, float64 GPTQ) the fitted
+grid lowers perplexity at equal width: 7–15 % over uniform at 4 bits (Qwen:
+22.65 → 19.23) and up to three orders of magnitude at 3 bits (Qwen: 55.703 → 68.5;
+SmolLM: 1.580 → 52.6). Equal-mass grids are 31–331 % worse than uniform, consistent
+with the Zador–Gersho p<sup>1/3</sup> level-density law. Fixed NF4 and FP4 E2M1 grids
+lose to fitted ones. The method rests on classical Lloyd–Max quantization theory; the
+contribution is a cheap parametric fit. Results cover two small models and one corpus;
+larger models, broader benchmarks, and kernel optimization remain open.</p>
+<p class="kw">Keywords: weight quantization, large language models, GPTQ, non-uniform
+grids, Kumaraswamy distribution, Lloyd–Max algorithm, deterministic quantization,
+perplexity.</p>
+</div>
+
+<h2>1. Introduction</h2>
+<p>Weight quantization of large language models (LLMs) has become the primary way to
+reduce inference memory requirements: weights occupy a volume proportional to the number
+of parameters and do not depend on the context length. The working standard is the
+<em>weight-only</em> mode: weights are represented by low-bit-width integer codes
+(3–4 bits) with a scale per group of 64–128 weights, while activations stay in fp16.
+In this mode, quality is determined by <b>which values</b> the weights are encoded with,
+and hardly depends on these codes being "integers".</p>
+
+<p>Traditionally, the value grid is chosen uniform-representative: after subtracting the
+zero point, weights are normalized by the group maximum and rounded onto a uniform
+lattice (the NF4 variant from QLoRA [3] takes a fixed Gaussian grid).
+Meanwhile, the transformer weight distribution is sharply peaked, with heavy tails and
+strong channel anisotropy; a mere exponent shift of the group scale does not cope with
+this. In this paper we test the hypothesis that the <b>grid shape</b> —
+the placement of levels relative to the weight density — is an independent
+quality lever, comparable in effect to the rounding algorithm.</p>
+
+<p>We call the method <b>SHAPEQ</b> (shape-adaptive quantization). For each weight tensor
+we fit a table of 2<sup>b</sup>
+levels (for 4 bits — 16 numbers stored as 32 fp16 bytes per tensor), generated
+by the quantile function of the Kumaraswamy distribution [10] with four
+parameters (one (a, b) pair for the positive and negative halves). The parameters
+are fitted by compass search on a weighted objective in which each weight's error
+contribution is weighted by the Hessian diagonal of the loss — that is, what is optimized
+is not the "average distance to a weight", but a proxy for the model's actual degradation.
+Rounding is performed by GPTQ [1] with the unchanged uniform code: grid shape and
+smart rounding add up.</p>
+
+<p>The approach is conservative by design. It relies on scalar quantization theory
+that has been established for decades [8, 9, 16] and adds only a parametric description
+of the level density. No model training, no gradient computation, and no search over the
+full tensor are involved: the fit is a coordinate descent over four numbers on a
+one-dimensional objective. With the histogram implementation (Section 7.7) the grid is an
+exact function of the tensor, so the same checkpoint always produces the same table.
+Because the method changes only the alphabet, it is orthogonal to the rest of the
+quantization pipeline: GPTQ and AWQ rounding, rotation-based preconditioning, sparse
+corrections, and mixed-precision bit allocation can all use the fitted grid unchanged.
+We test the combination with GPTQ here; the other combinations are discussed in
+Section 7.4.</p>
+
+<p>Contributions of this work:</p>
+<ol>
+<li>a formulation of grid fitting as a weighted Lloyd–Max quantization problem
+with a parametric family of shapes (Section 4), and a practical fitting algorithm
+costing under a second per tensor (Algorithm 1);</li>
+<li>an experimental "layer-MSE → perplexity" protocol on two models
+(SmolLM-135M, Qwen2.5-0.5B) and the full bit-width ladder 8/6/4/3/2 for the fitted
+grid (Section 6);</li>
+<li>an experimental refutation of the popular "equal-mass" grid idea
+(Section 6.5) and a quantitative assessment of the contribution of Hessian weighting,
+symmetry, and the number of shape parameters (Sections 6.2–6.4);</li>
+<li>a comparison with fixed "smart" grids — NF4 [3] and the hardware FP4 E2M1
+from the OCP MX format [14]: per-tensor shape fitting gives a stable −15…−17 % of
+weighted error relative to NF4; the FP4 comparison is included in the protocol
+(Section 6.6).</li>
+</ol>
+
+<h2>2. Related work</h2>
+<p><b>Optimal grids.</b> The problem of choosing levels that minimize the mean squared
+deviation for a given density is classical: Lloyd's necessary conditions (1957 [8])
+and Max's independent solution (1960 [9]) yield an iterative "centroids–nearest
+regions" algorithm — what is known in machine learning as Lloyd–Max / k-means for 1D;
+for a large number of levels, the optimal level placement becomes asymptotically
+quantile. NF4 from QLoRA [3] uses this idea in "frozen" form —
+quantiles of the normal density without fitting to the data. We use a parametric
+family instead of Lloyd iterations, because (a) our objective
+is Hessian-weighted and includes the GPTQ stage, for which there are no reference
+"centroids", and (b) a cheap online procedure per tensor is required.</p>
+
+<p><b>Rounding algorithms.</b> OBS/GPTQ [1] minimize the quadratic form
+tr(ΔW H ΔWᵀ) with the Hessian from calibration activations; AWQ [2] protects
+"important" channels by scaling; sparse hybrids (SpQR [6], SqueezeLLM [4]) move
+outliers into sparse corrections — effectively adding more bits to the model, but locally.
+Our method is orthogonal to this entire list: it changes the alphabet, not the rounding
+order, and in this paper it is combined only with GPTQ.</p>
+
+<p><b>Fixed microformats.</b> The OCP Microscaling family (MXFP8/MXFP4,
+[14]) standardizes block formats with e4m3/e8m0 scales and a fixed E2M1 grid
+for 4 bits; GGUF/IQ4_NL in llama.cpp [15] is the de facto standard of a "fixed
+non-uniform" grid in production CPU inference. These formats choose the grid once
+for "average weights"; we show that per-tensor fitting is cheap and consistently
+outperforms them at equal storage cost.</p>
+
+<h2>3. Problem statement</h2>
+<p>Let W ∈ ℝ<sup>m×n</sup> be the weight tensor of a linear layer, X — the calibration
+activations (T × n), H = XᵀX/T — their Gram (approximate Hessian) matrix.
+Second-order loss degradation of a layer is estimated as tr(ΔW H ΔWᵀ) [1]; we
+use its diagonally corrected version at the grid-fitting stage (weights
+w<sub>i</sub> = diag(H), with smoothing and a correction for GPTQ error propagation), and
+the full quadratic form — at the rounding stage.</p>
+<p class="formula">min<sub>G, idx</sub> Σ<sub>i,j</sub> diag(H)<sub>j</sub> · (W<sub>ij</sub> − s · G<sub>idx(i,j)</sub>)²,</p>
+<p>where G is a table of L = 2<sup>b</sup> levels (shared across the tensor), s is the group
+scale (fp16 per 128/96 weights), idx are integer codes. Storage: b bit/weight +
+16 bits per group + <b>32 bytes of LUT per tensor</b> (16×fp16) — on an 896×4864
+tensor this is 0.0006 bit/weight, i.e. free for any b ≤ 8.</p>
+<h2>4. Algorithms</h2>
+
+<h3>4.1. Family of shapes</h3>
+<p>As the quantile function (mapping the uniform grid u<sub>k</sub> = (k+0.5)/L
+to the "magnitudes" of the levels) we adopt the Kumaraswamy inverse distribution function [10]:</p>
+<p class="formula">Q(u; a, b) = ( 1 − (1 − u)<sup>1/b</sup> )<sup>1/a</sup>,</p>
+<p>which for a = b = 1 yields a uniform grid, for a, b &gt; 1 an S-shaped one
+(densification toward the modal zones and rarefaction in the tails), for a, b &lt; 1 a
+reverse-S one (densification toward both poles). With one pair (a, b) per half
+of the distribution, the shape is described by four numbers; this family covers all
+bend types observed in the weight histograms of 21 SmolLM layers (Section 6.4).
+The negative and positive halves are built independently and joined at zero;
+the zero level is always present in the table.</p>
+
+<h3>4.2. Hessian-guided grid fitting (Algorithm 1)</h3>
+<pre class="algo">Input: W (m×n), h = diag(H) with smoothing h ← (h + ε·mean h)/(1+ε),
+      L, group g.
+1  For each group, weights are normalized by absmax → y ∈ [−1, 1];
+   magnitudes |y| with weights w = repeated h form the sample (≤150 000 points).
+2  θ = (a₋, b₋, a₊, b₊) ← (1, 1, 1, 1)   // uniform as the starting point
+   step d ← 0.5
+   while d &gt; 0.02:
+     for each of the 8 compass directions:
+       θ' ← θ ± d·eᵢ (probes ≥ 0.05 only)
+       θ ← argmin C(θ'), where C is the objective of Alg. 2 with L levels
+     d ← d/2
+3  κ ← scale search (Alg. 2, item 4): shift the whole table by a factor κ
+   on a 0.90…1.10 grid, minimizing the same objective   // "tail" trade-off
+4  G ← shapeq_grid(L, θ) · κ, normalize by the absmax of the table.
+</pre>
+<p>The objective is the normalized weighted MSE Σ w·(y − G[idx(y)])² / Σ w·y²,
+computed over 150 thousand subsample points in ~1 ms; a full compass descent
+(≈60 objective evaluations per side) costs &lt; 1 s per tensor. Weighting by diag(H)
+is what makes the method "Hessian-aware": channels with large activations get denser
+levels. The ε smoothing guards against zero weights; without it the fitting degenerates.</p>
+
+<h3>4.3. Table refit (Algorithm 2, "Hessian Lloyd")</h3>
+<pre class="algo">Input: W, h, G (after Alg. 1), number of rounds R (we use R = 3).
+repeat R times:
+  1  idx ← nearest level (in the group scale);
+  2  for each level k: Gₖ ← Σ w·y / Σ w over all points of bucket k
+     (weighted centroid; empty buckets are not moved);
+  3  renormalize G by absmax;
+return the best G under the objective C.
+</pre>
+<p>This is the classic Lloyd step with Hessian weights: it does not change the shape
+family; it "polishes" the levels to optimal for the real data shape and the real
+bucket partition. The refit is cheap (one pass over the tensor per round) and was used
+in our experiments as a booster for the winner (the "+refit3" configurations).</p>
+
+<h3>4.4. GPTQ rounding (Algorithm 3)</h3>
+<p>We use the reference GPTQ implementation [1] with the diagonal correction: cholesky
+of H⁻¹, sequential column-by-column rounding with error propagation to
+unprocessed columns. The only change relative to the canon is that the level
+weighting grid is not uniform but G from Algorithm 1 (for fixed grids —
+NF4/FP4 — its own table with no fitting). Numerical operations run in float64 on CPU; this
+matters: f32 GPTQ variants on GPU give a discrepancy of order 10⁻² from f64 at rare
+level boundaries (Section 5.4).</p>
+
+<h3>4.5. Storage and cost</h3>
+<p>A weight tensor after quantization: codes (b bit/weight) + group scales (fp16 per
+128 Qwen / 96 SmolLM weights = 0.125–0.167 bit/weight) + a 16×fp16 LUT = 32 bytes
+per tensor + 4 bytes of group zero point (absorbed into the scale). The final cost for
+our runs is the "bit/weight" column of Tables 1–2: 3.25 and 4.25 bits. Decoding at
+inference is a table lookup (as IQ4_NL in llama.cpp [15]), latency O(1);
+matrix multiplication remains weight-only (activations fp16), so 4-bit
+hardware FP4 matrices [14] do not compete with our method but complement it
+(Section 7.4).</p>
+
+<h2>5. Experimental protocol</h2>
+<h3>5.1. Models and data</h3>
+<p>SmolLM-135M [13] (30 layers, hidden 576, llama-type architecture) and Qwen2.5-0.5B [12]
+(24 layers, hidden 896, GQA with 2 kv heads). Calibration: 2048 (SmolLM) / 1024 (Qwen) sequences of
+512 tokens from WikiText-2 [11]; evaluation — the same chunks (96 / 64 sequences
+with a sliding window, without overlap), perplexity over all tokens. Groups: 96 and 128
+weights. All linear layers (q/k/v/o, gate/up/down) are quantized simultaneously,
+embeddings and layernorms remain fp16/fp32 — the standard weight-only scheme.</p>
+
+<h3>5.2. Two-level metric</h3>
+<p>First the cheap proxy — relative layer error tr(ΔW H ΔWᵀ)/tr(W H Wᵀ)
+over 21 sampled layers (runtime &lt; 1 min per configuration), then full perplexity
+(10–90 min per configuration). The proxy was used to cull shapes that were
+clearly doomed (Section 6.5); final conclusions rest on ppl only.</p>
+
+<h3>5.3. Fairness of comparisons</h3>
+<p>All configurations in one comparison row use the same Hessian
+(shared calibration), the same GPTQ code, and the same evaluation chunks. A known simplification:
+the Hessian is computed once for the fp16 model and is not rebuilt after quantization
+("stale Hessian" — standard GPTQ practice [1]); for severely degraded
+configurations (b2/b3 uniform) this may underestimate the real damage — in our
+favor, and we note it. The GPU branch of the ppl evaluation (NVIDIA MX250 under WSL2) gives
+ppl matching CPU with an accuracy of 10⁻³ (17.067 vs 17.066); the discrepancy
+of the f32-GPTQ quantization itself — see 5.4.</p>
+
+<h3>5.4. Validation of the numbers</h3>
+<p>Grid fitting, refit, and GPTQ are carried out by a reference numpy implementation (float64).
+The pipeline's GPU shadow was verified by a separate gate: the discrepancy of weighted layer
+errors between CPU and GPU quantization ≤ 0.03 %, the ppl discrepancy — 0.006 %; on this basis
+part of the rows (fp8, the Qwen b4 family) were computed by the shadow front and marked
+in the tables as "gpu". The full set of artifacts (CSV, JSON, codes) is attached
+(Section A).</p>
+<h2>6. Results</h2>
+
+<h3>6.1. Main bit-width ladder (SmolLM-135M)</h3>
+<table><thead><tr><th>Configuration</th><th>bit/weight</th><th>WikiText-2 ppl</th><th>vs fp32</th><th>within its bit-width</th><th>quant., s</th></tr></thead><tbody><tr><td>fp32</td><td>32.0</td><td><b>23.358</b></td><td class='neg'>—</td><td>—</td><td class='muted'>0</td></tr><tr><td>b8 shapeq</td><td>8.333</td><td><b>23.355</b></td><td class='neg'>±0.0 %</td><td><b>best</b></td><td class='muted'>871</td></tr><tr><td>b8 shapeq+refit3</td><td>8.333</td><td><b>23.362</b></td><td class='neg'>+0.0 %</td><td>+0.0 %</td><td class='muted'>4 557</td></tr><tr><td>b6 shapeq</td><td>6.333</td><td><b>23.463</b></td><td class='neg'>+0.4 %</td><td><b>best</b></td><td class='muted'>405</td></tr><tr><td>b6 shapeq+refit3</td><td>6.333</td><td><b>23.531</b></td><td class='neg'>+0.7 %</td><td>+0.3 %</td><td class='muted'>3 333</td></tr><tr><td>b4 uniform</td><td>4.333</td><td><b>33.806</b></td><td class=''>+44.7 %</td><td>+30.4 %</td><td class='muted'>175</td></tr><tr><td>b4 shapeq</td><td>4.333</td><td><b>31.385</b></td><td class=''>+34.4 %</td><td>+21.1 %</td><td class='muted'>698</td></tr><tr><td>b4 shapeq+refit3</td><td>4.333</td><td><b>25.924</b></td><td class=''>+11.0 %</td><td><b>best</b></td><td class='muted'>1 846</td></tr><tr><td>b4 fp4</td><td>4.333</td><td><b>27.067</b></td><td class=''>+15.9 %</td><td>+4.4 %</td><td class='muted'>173</td></tr><tr><td>b4 eqmassk</td><td>4.333</td><td><b>44.295</b></td><td class='pos'>+89.6 %</td><td>+70.9 %</td><td class='muted'>173</td></tr><tr><td>b4 eqmass</td><td>4.333</td><td><b>186.694</b></td><td class='pos'>×8.0</td><td>+620.2 %</td><td class='muted'>169</td></tr><tr><td>b3 uniform</td><td>3.333</td><td><b>1 580.159</b></td><td class='pos'>×67.6</td><td>+3928.9 %</td><td class='muted'>278</td></tr><tr><td>b3 uniform_k</td><td>3.333</td><td><b>29 068.159</b></td><td class='pos'>×1244.5</td><td>+74013.8 %</td><td class='muted'>265</td></tr><tr><td>b3 shapeq</td><td>3.333</td><td><b>52.563</b></td><td class='pos'>×2.3</td><td>+34.0 %</td><td class='muted'>938</td></tr><tr><td>b3 shapeq+refit3</td><td>3.333</td><td><b>39.221</b></td><td class='pos'>+67.9 %</td><td><b>best</b></td><td class='muted'>1 799</td></tr><tr><td>b3 eqmass</td><td>3.333</td><td><b>2 829.929</b></td><td class='pos'>×121.2</td><td>+7115.3 %</td><td class='muted'>153</td></tr><tr><td>rco 3.5 form</td><td>3.833</td><td><b>31.372</b></td><td class=''>+34.3 %</td><td>—</td><td class='muted'>1 031</td></tr><tr><td>b2 uniform_k</td><td>2.333</td><td><b>45 302 916.186</b></td><td class='pos'>×1939503.2</td><td>+1160898.8 %</td><td class='muted'>305</td></tr><tr><td>b2 shapeq</td><td>2.333</td><td><b>306 235.929</b></td><td class='pos'>×13110.5</td><td>+7748.0 %</td><td class='muted'>1 051</td></tr><tr><td>b2 shapeq+refit3</td><td>2.333</td><td><b>3 902.064</b></td><td class='pos'>×167.1</td><td><b>best</b></td><td class='muted'>930</td></tr><tr><td>b2 eqmass</td><td>2.333</td><td><b>1 308 910.264</b></td><td class='pos'>×56036.9</td><td>+33444.0 %</td><td class='muted'>132</td></tr></tbody></table>
+<p class="cap">Table 1. SmolLM-135M, group 96, WikiText-2 ppl (96 evaluation chunks).
+"bit/weight" is the full storage cost. The 8/6-bit and fp4 rows are a continuation of the run.</p>
+
+<p>At 4 bits the gap between forms is still modest (33.8 vs
+31.4, the fitted grid's gain ≈
+7 %
+in ppl loss against fp32), but it explodes as bit-width drops: at 3 bits
+the uniform grid yields ppl 1 580 (68 times worse than the base),
+whereas the fitted one — 52.6 (only ×2.3).
+The gap is ×30. At 2 bits uniform ceases to be a language model at all
+(ppl ~10<sup>10</sup>), while shapeq, though it degrades, preserves the structure.</p>
+
+<h3>6.2. Arbitration on a larger model (Qwen2.5-0.5B)</h3>
+<table><thead><tr><th>Configuration</th><th>bit/weight</th><th>WikiText-2 ppl</th><th>vs fp16</th><th>within its bit-width</th><th>quant., s</th></tr></thead><tbody><tr><td>fp16</td><td>32.0</td><td><b>17.066</b></td><td class='neg'>—</td><td>—</td><td class='muted'>0</td></tr><tr><td>fp8 e4m3</td><td>8.125</td><td><b>17.230</b></td><td class='neg'>+1.0 %</td><td>—</td><td class='muted'>1</td></tr><tr><td>b4 uniform</td><td>4.25</td><td><b>22.649</b></td><td class=''>+32.7 %</td><td>+19.2 %</td><td class='muted'>704</td></tr><tr><td>b4 fp4</td><td>4.25</td><td><b>20.211</b></td><td class=''>+18.4 %</td><td>+6.3 %</td><td class='muted'>952</td></tr><tr><td>b4 shapeq</td><td>4.25</td><td><b>19.225</b></td><td class=''>+12.7 %</td><td>+1.2 %</td><td class='muted'>1 152</td></tr><tr><td>b4 shapeq+refit3</td><td>4.25</td><td><b>19.005</b></td><td class=''>+11.4 %</td><td><b>best</b></td><td class='muted'>4 786</td></tr><tr><td>b4 eqmassk</td><td>4.25</td><td><b>43.960</b></td><td class='pos'>×2.6</td><td>+131.3 %</td><td class='muted'>662</td></tr><tr><td>b4 eqmass</td><td>4.25</td><td><b>412.556</b></td><td class='pos'>×24.2</td><td>+2070.8 %</td><td class='muted'>688</td></tr><tr><td>b3 uniform</td><td>3.25</td><td><b>55 703.448</b></td><td class='pos'>×3264.0</td><td>+166482.3 %</td><td class='muted'>498</td></tr><tr><td>b3 uniform_k</td><td>3.25</td><td><b>19 285.489</b></td><td class='pos'>×1130.1</td><td>+57573.6 %</td><td class='muted'>544</td></tr><tr><td>b3 shapeq</td><td>3.25</td><td><b>68.517</b></td><td class='pos'>×4.0</td><td>+104.9 %</td><td class='muted'>1 098</td></tr><tr><td>b3 shapeq+refit3</td><td>3.25</td><td><b>33.439</b></td><td class='pos'>+95.9 %</td><td><b>best</b></td><td class='muted'>3 834</td></tr><tr><td>b2 uniform</td><td>2.25</td><td><b>4 834 445.700</b></td><td class='pos'>×283279.4</td><td>+24447.7 %</td><td class='muted'>458</td></tr><tr><td>b2 shapeq</td><td>2.25</td><td><b>103 854.597</b></td><td class='pos'>×6085.5</td><td>+427.3 %</td><td class='muted'>951</td></tr><tr><td>b2 shapeq+refit3</td><td>2.25</td><td><b>19 694.082</b></td><td class='pos'>×1154.0</td><td><b>best</b></td><td class='muted'>2 875</td></tr><tr><td>b3 lloyd rtn hist</td><td>3.25</td><td><b>39.904</b></td><td class='pos'>×2.3</td><td>+19.3 %</td><td class='muted'>132</td></tr><tr><td>b2 lloyd rtn hist</td><td>2.25</td><td><b>31 813.388</b></td><td class='pos'>×1864.1</td><td>+61.5 %</td><td class='muted'>97</td></tr></tbody></table>
+<p class="cap">Table 2. Qwen2.5-0.5B, group 128, 1024 calibration rows, 64 evaluation chunks.
+The fp8/b4 rows were computed by the GPU branch (ppl evaluation on the MX250, bitwise-identical CPU quantization).</p>
+
+<figure class='fig'><svg viewBox='0 0 640 300' width='100%' xmlns='http://www.w3.org/2000/svg' font-family='Georgia,serif'><text x='144' y='40' text-anchor='end' font-size='12'>b3 uniform</text><rect x='150' y='30' width='400.0' height='16' fill='#9CA3AF' opacity='0.85'/><text x='556' y='43' font-size='12'>55 703.45</text><text x='144' y='66' text-anchor='end' font-size='12'>b3 uniform_k</text><rect x='150' y='56' width='350.8' height='16' fill='#9CA3AF' opacity='0.85'/><text x='507' y='69' font-size='12'>19 285.49</text><text x='144' y='92' text-anchor='end' font-size='12'>b3 shapeq</text><rect x='150' y='82' width='89.2' height='16' fill='#C2410C' opacity='0.85'/><text x='245' y='95' font-size='12'>68.52</text><text x='144' y='118' text-anchor='end' font-size='12'>b4 uniform</text><rect x='150' y='108' width='37.9' height='16' fill='#9CA3AF' opacity='0.85'/><text x='194' y='121' font-size='12'>22.65</text><text x='144' y='144' text-anchor='end' font-size='12'>b4 fp4</text><rect x='150' y='134' width='32.6' height='16' fill='#a16207' opacity='0.85'/><text x='189' y='147' font-size='12'>20.21</text><text x='144' y='170' text-anchor='end' font-size='12'>b4 shapeq</text><rect x='150' y='160' width='30.3' height='16' fill='#C2410C' opacity='0.85'/><text x='186' y='173' font-size='12'>19.23</text><text x='144' y='196' text-anchor='end' font-size='12'>b4 eqmass</text><rect x='150' y='186' width='172.5' height='16' fill='#a16207' opacity='0.85'/><text x='329' y='199' font-size='12'>412.56</text><text x='144' y='222' text-anchor='end' font-size='12'>b4 eqmassk</text><rect x='150' y='212' width='68.7' height='16' fill='#a16207' opacity='0.85'/><text x='225' y='225' font-size='12'>43.96</text><text x='144' y='248' text-anchor='end' font-size='12'>fp8 e4m3</text><rect x='150' y='238' width='25.2' height='16' fill='#1d4ed8' opacity='0.85'/><text x='181' y='251' font-size='12'>17.23</text><text x='144' y='274' text-anchor='end' font-size='12'>fp16</text><rect x='150' y='264' width='24.8' height='16' fill='#1F2430' opacity='0.85'/><text x='181' y='277' font-size='12'>17.07</text></svg><figcaption>Fig. 1. Qwen2.5-0.5B: WikiText-2 ppl on a logarithmic scale. Gray — uniform grid, orange — fitted (shapeq), gold — fixed "smart" grids (FP4/eqmass), blue/black — references.</figcaption></figure>
+
+<p>The effect reproduces on a second architecture and is confirmed in amplified
+form: b3 uniform 55 703 vs shapeq
+68.5 — a gap of <b>×813</b> (on SmolLM — ×30).
+The behavior of the "almost-safe" rungs also matters: fp8 e4m3 costs only
+1.0 %
+in ppl, while 4 bits with a fitted form already cost 12.7 %;
+further compression is territory where the form decides everything.</p>
+
+<h3>6.3. Form vs rounding</h3>
+<p>The form and GPTQ compensation add up rather than
+compete: on b3 the "uniform + κ" configuration (search over only the global
+table scale) yields 19 285 on Qwen —
+3 times better
+than pure uniform, but 281 times
+worse than the fitted form under the same GPTQ. Lloyd refit of the table (Alg. 2, 3 rounds)
+adds on top: SmolLM b3 52.6 → 39.2 ppl (−25.4 %).</p>
+<p>And a separate observation on the safety of the fitting itself. The κ range (fit_scale) has been
+clamped from the very start ([0.40; 1.25]) — yet on SmolLM uniform_k fails at almost every
+rung: b7 — 44.0; b6 — 55.5 vs 23.7 for pure uniform; b5 — 389; b3 — 29 068;
+b2 — 45 million (fp32 ladder; base 23.4). The fp16-GPU trace reproduces this (b6 — 90.6;
+b4 — 1 665). The issue is not the width of the range: in one tensor (layer 11, mlp.down_proj) the
+Hessian weights in the heavy tail are nearly zero, and the surrogate objective treats truncating the tail
+as free (κ ≈ 0.66, raw tensor error 0.008 % → 11.8 %), while the model needs the tails.
+On Qwen uniform_k stays adequate at the top rungs and falls from b4 (159 → 19 285 → 7.5 million).
+Conclusion: besides range clamping, scale fitting needs a tail guard — a fallback to κ = 1
+when the quantiles' weight mass is near zero; without it the method is unpredictable on the
+rungs where it promises improvement.</p>
+
+<h3>6.4. How many parameters the form needs</h3>
+<table><thead><tr><th>Grid</th><th>variant</th><th>compression cost</th><th>what the form captures</th></tr></thead><tbody><tr><td>8 levels</td><td>4p — shapeq</td><td>0.03738</td><td class='muted'>baseline: absolute objective Σwy²r²/Σwy²</td></tr><tr><td>8 levels</td><td>3a</td><td class='pos'>+0.53 %</td><td class='muted'>shared a (tail curvature); worst tensor +3.6 %</td></tr><tr><td>8 levels</td><td>3b</td><td class='pos'>+0.11 %</td><td class='muted'>shared b (starting curvature); worst tensor +1.3 %</td></tr><tr><td>8 levels</td><td>2s</td><td class='pos'>+1.03 %</td><td class='muted'>symmetric form (shapeq-sym); worst tensor +5.8 %</td></tr><tr><td>16 levels</td><td>4p — shapeq</td><td>0.00796</td><td class='muted'>baseline: absolute objective Σwy²r²/Σwy²</td></tr><tr><td>16 levels</td><td>3a</td><td class='pos'>+1.53 %</td><td class='muted'>shared a (tail curvature); worst tensor +10.1 %</td></tr><tr><td>16 levels</td><td>3b</td><td class='pos'>+1.13 %</td><td class='muted'>shared b (starting curvature); worst tensor +20.3 %</td></tr><tr><td>16 levels</td><td>2s</td><td class='pos'>+2.49 %</td><td class='muted'>symmetric form (shapeq-sym); worst tensor +25.8 %</td></tr></tbody></table>
+<p class="cap">Table 3. Compressing the form description: mean normalized objective over 21 layers.</p>
+<p>Compressing the form description to three coefficients comes cheap:
++1.13 % (shared b) or
++1.53 % (shared a) at 16 levels,
+but the full transition to the symmetric 2s form rises to
++2.5 % on average and
++26 on the worst tensor —
+the asymmetry of the halves of the weight distribution is real, and different (a, b) pairs catch it. This is also visible on the θ map of all tensors (gridmap): the sign patterns
+of the deviations (a−1) and (b−1) occupy 3 of the 4 quadrants
+[SmolLM — [(a, b): 7 / (ā, b): 13 / (ā, b̄): 1]; Qwen — [(a, b): 2 / (ā, b): 19]] — a single "correct form" for all layers does not exist,
+per-tensor fitting is mandatory.</p>
+
+<figure class='fig'><svg viewBox='0 0 640 300' width='100%' xmlns='http://www.w3.org/2000/svg' font-family='Georgia,serif'><rect x='46.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='50.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='54.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='58.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='62.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='66.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='70.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='75.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='79.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='83.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='87.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='91.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='95.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='99.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='104.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='108.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='112.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='116.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='120.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='124.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='128.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='133.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='137.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='141.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='145.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='149.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='153.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='157.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='162.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='166.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='170.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='174.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='178.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='182.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='186.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='191.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='195.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='199.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='203.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='207.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='211.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='215.9' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='220.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='224.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='228.3' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='232.4' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='236.6' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='240.7' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='244.9' y='265.7' width='4.1' height='0.3' fill='#E7E5E0'/><rect x='249.0' y='265.7' width='4.1' height='0.3' fill='#E7E5E0'/><rect x='253.1' y='265.6' width='4.1' height='0.4' fill='#E7E5E0'/><rect x='257.3' y='265.4' width='4.1' height='0.6' fill='#E7E5E0'/><rect x='261.4' y='265.2' width='4.1' height='0.8' fill='#E7E5E0'/><rect x='265.6' y='264.9' width='4.1' height='1.1' fill='#E7E5E0'/><rect x='269.7' y='264.4' width='4.1' height='1.6' fill='#E7E5E0'/><rect x='273.9' y='263.8' width='4.1' height='2.2' fill='#E7E5E0'/><rect x='278.0' y='263.0' width='4.1' height='3.0' fill='#E7E5E0'/><rect x='282.1' y='261.3' width='4.1' height='4.7' fill='#E7E5E0'/><rect x='286.3' y='259.0' width='4.1' height='7.0' fill='#E7E5E0'/><rect x='290.4' y='256.2' width='4.1' height='9.8' fill='#E7E5E0'/><rect x='294.6' y='251.1' width='4.1' height='14.9' fill='#E7E5E0'/><rect x='298.7' y='244.2' width='4.1' height='21.8' fill='#E7E5E0'/><rect x='302.9' y='232.6' width='4.1' height='33.4' fill='#E7E5E0'/><rect x='307.0' y='217.6' width='4.1' height='48.4' fill='#E7E5E0'/><rect x='311.1' y='192.8' width='4.1' height='73.2' fill='#E7E5E0'/><rect x='315.3' y='162.0' width='4.1' height='104.0' fill='#E7E5E0'/><rect x='319.4' y='126.4' width='4.1' height='139.6' fill='#E7E5E0'/><rect x='323.6' y='85.1' width='4.1' height='180.9' fill='#E7E5E0'/><rect x='327.7' y='48.9' width='4.1' height='217.1' fill='#E7E5E0'/><rect x='331.9' y='26.0' width='4.1' height='240.0' fill='#E7E5E0'/><rect x='336.0' y='27.7' width='4.1' height='238.3' fill='#E7E5E0'/><rect x='340.1' y='48.0' width='4.1' height='218.0' fill='#E7E5E0'/><rect x='344.3' y='83.6' width='4.1' height='182.4' fill='#E7E5E0'/><rect x='348.4' y='125.2' width='4.1' height='140.8' fill='#E7E5E0'/><rect x='352.6' y='162.5' width='4.1' height='103.5' fill='#E7E5E0'/><rect x='356.7' y='192.5' width='4.1' height='73.5' fill='#E7E5E0'/><rect x='360.9' y='218.3' width='4.1' height='47.7' fill='#E7E5E0'/><rect x='365.0' y='232.9' width='4.1' height='33.1' fill='#E7E5E0'/><rect x='369.1' y='243.7' width='4.1' height='22.3' fill='#E7E5E0'/><rect x='373.3' y='251.7' width='4.1' height='14.3' fill='#E7E5E0'/><rect x='377.4' y='256.2' width='4.1' height='9.8' fill='#E7E5E0'/><rect x='381.6' y='259.4' width='4.1' height='6.6' fill='#E7E5E0'/><rect x='385.7' y='261.5' width='4.1' height='4.5' fill='#E7E5E0'/><rect x='389.9' y='263.1' width='4.1' height='2.9' fill='#E7E5E0'/><rect x='394.0' y='263.8' width='4.1' height='2.2' fill='#E7E5E0'/><rect x='398.1' y='264.3' width='4.1' height='1.7' fill='#E7E5E0'/><rect x='402.3' y='264.9' width='4.1' height='1.1' fill='#E7E5E0'/><rect x='406.4' y='265.2' width='4.1' height='0.8' fill='#E7E5E0'/><rect x='410.6' y='265.4' width='4.1' height='0.6' fill='#E7E5E0'/><rect x='414.7' y='265.6' width='4.1' height='0.4' fill='#E7E5E0'/><rect x='418.9' y='265.7' width='4.1' height='0.3' fill='#E7E5E0'/><rect x='423.0' y='265.8' width='4.1' height='0.2' fill='#E7E5E0'/><rect x='427.1' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='431.3' y='265.8' width='4.1' height='0.2' fill='#E7E5E0'/><rect x='435.4' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='439.6' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='443.7' y='265.9' width='4.1' height='0.1' fill='#E7E5E0'/><rect x='447.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='452.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='456.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='460.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='464.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='468.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='472.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='476.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='481.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='485.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='489.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='493.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='497.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='501.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='505.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='510.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='514.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='518.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='522.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='526.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='530.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='534.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='539.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='543.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='547.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='551.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='555.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='559.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='563.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='568.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='572.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='576.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='580.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='584.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='588.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='592.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='597.0' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='601.1' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='605.3' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='609.4' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='613.6' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='617.7' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><rect x='621.9' y='266.0' width='4.1' height='0.0' fill='#E7E5E0'/><line x1='46.0' y1='14' x2='46.0' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='84.7' y1='14' x2='84.7' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='123.3' y1='14' x2='123.3' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='162.0' y1='14' x2='162.0' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='200.7' y1='14' x2='200.7' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='239.3' y1='14' x2='239.3' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='278.0' y1='14' x2='278.0' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='316.7' y1='14' x2='316.7' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='355.3' y1='14' x2='355.3' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='394.0' y1='14' x2='394.0' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='432.7' y1='14' x2='432.7' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='471.3' y1='14' x2='471.3' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='510.0' y1='14' x2='510.0' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='548.7' y1='14' x2='548.7' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='587.3' y1='14' x2='587.3' y2='20' stroke='#9CA3AF' stroke-width='2'/><line x1='626.0' y1='14' x2='626.0' y2='20' stroke='#9CA3AF' stroke-width='2'/><text x='626' y='19' text-anchor='end' font-size='11' fill='#9CA3AF'>uniform</text><line x1='46.0' y1='19' x2='46.0' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='130.8' y1='19' x2='130.8' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='178.8' y1='19' x2='178.8' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='215.1' y1='19' x2='215.1' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='245.8' y1='19' x2='245.8' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='273.4' y1='19' x2='273.4' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='299.1' y1='19' x2='299.1' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='323.8' y1='19' x2='323.8' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='348.2' y1='19' x2='348.2' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='372.9' y1='19' x2='372.9' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='398.6' y1='19' x2='398.6' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='426.2' y1='19' x2='426.2' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='456.9' y1='19' x2='456.9' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='493.2' y1='19' x2='493.2' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='541.2' y1='19' x2='541.2' y2='25' stroke='#1d4ed8' stroke-width='2'/><line x1='626.0' y1='19' x2='626.0' y2='25' stroke='#1d4ed8' stroke-width='2'/><text x='626' y='24' text-anchor='end' font-size='11' fill='#1d4ed8'>NF4 (quantiles N(0.1))</text><line x1='46.0' y1='24' x2='46.0' y2='30' stroke='#a16207' stroke-width='2'/><line x1='142.7' y1='24' x2='142.7' y2='30' stroke='#a16207' stroke-width='2'/><line x1='191.0' y1='24' x2='191.0' y2='30' stroke='#a16207' stroke-width='2'/><line x1='239.3' y1='24' x2='239.3' y2='30' stroke='#a16207' stroke-width='2'/><line x1='263.5' y1='24' x2='263.5' y2='30' stroke='#a16207' stroke-width='2'/><line x1='287.7' y1='24' x2='287.7' y2='30' stroke='#a16207' stroke-width='2'/><line x1='311.8' y1='24' x2='311.8' y2='30' stroke='#a16207' stroke-width='2'/><line x1='336.0' y1='24' x2='336.0' y2='30' stroke='#a16207' stroke-width='2'/><line x1='336.0' y1='24' x2='336.0' y2='30' stroke='#a16207' stroke-width='2'/><line x1='360.2' y1='24' x2='360.2' y2='30' stroke='#a16207' stroke-width='2'/><line x1='384.3' y1='24' x2='384.3' y2='30' stroke='#a16207' stroke-width='2'/><line x1='408.5' y1='24' x2='408.5' y2='30' stroke='#a16207' stroke-width='2'/><line x1='432.7' y1='24' x2='432.7' y2='30' stroke='#a16207' stroke-width='2'/><line x1='481.0' y1='24' x2='481.0' y2='30' stroke='#a16207' stroke-width='2'/><line x1='529.3' y1='24' x2='529.3' y2='30' stroke='#a16207' stroke-width='2'/><line x1='626.0' y1='24' x2='626.0' y2='30' stroke='#a16207' stroke-width='2'/><text x='626' y='29' text-anchor='end' font-size='11' fill='#a16207'>FP4 E2M1</text><line x1='46.0' y1='29' x2='46.0' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='134.9' y1='29' x2='134.9' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='187.0' y1='29' x2='187.0' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='225.7' y1='29' x2='225.7' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='257.0' y1='29' x2='257.0' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='283.5' y1='29' x2='283.5' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='306.6' y1='29' x2='306.6' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='326.9' y1='29' x2='326.9' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='345.3' y1='29' x2='345.3' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='366.0' y1='29' x2='366.0' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='389.4' y1='29' x2='389.4' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='416.2' y1='29' x2='416.2' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='447.8' y1='29' x2='447.8' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='486.6' y1='29' x2='486.6' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='538.5' y1='29' x2='538.5' y2='35' stroke='#C2410C' stroke-width='2'/><line x1='626.0' y1='29' x2='626.0' y2='35' stroke='#C2410C' stroke-width='2'/><text x='626' y='34' text-anchor='end' font-size='11' fill='#C2410C'>shapeq (fitted)</text><text x='46' y='284' text-anchor='middle' font-size='11'>-1.0</text><text x='191' y='284' text-anchor='middle' font-size='11'>-0.5</text><text x='336' y='284' text-anchor='middle' font-size='11'>0.0</text><text x='481' y='284' text-anchor='middle' font-size='11'>0.5</text><text x='626' y='284' text-anchor='middle' font-size='11'>1.0</text><text x='38' y='146.0' transform='rotate(-90 38 146.0)' text-anchor='middle' font-size='11'>frequency</text></svg><figcaption>Fig. 2. Weight histogram of model.layers.0.mlp.down_proj (SmolLM, absmax normalization) and level positions of the four grids. The fitted grid densifies in the modal zone and leaves rare levels in the tails; NF4 and FP4 densify the center "by eye", ignoring the data.</figcaption></figure>
+
+<h3>6.5. Refutation of equal-mass grids</h3>
+<figure class='fig'><svg viewBox='0 0 640 250' width='100%' xmlns='http://www.w3.org/2000/svg' font-family='Georgia,serif'><rect x='52' y='6' width='11' height='11' fill='#9CA3AF'/><text x='67' y='16' font-size='11'>uniform</text><rect x='212' y='6' width='11' height='11' fill='#1d4ed8'/><text x='227' y='16' font-size='11'>NF4</text><rect x='372' y='6' width='11' height='11' fill='#C2410C'/><text x='387' y='16' font-size='11'>shapeq</text><rect x='532' y='6' width='11' height='11' fill='#dc2626'/><text x='547' y='16' font-size='11'>eqmass (equal-mass)</text><rect x='66' y='91' width='34' height='119' fill='#9CA3AF' opacity='.85'/><text x='83' y='87' text-anchor='middle' font-size='10'>20.2</text><rect x='106' y='107' width='34' height='103' fill='#1d4ed8' opacity='.85'/><text x='123' y='103' text-anchor='middle' font-size='10'>17.4</text><rect x='146' y='125' width='34' height='85' fill='#C2410C' opacity='.85'/><text x='163' y='121' text-anchor='middle' font-size='10'>14.4</text><rect x='186' y='53' width='34' height='157' fill='#dc2626' opacity='.85'/><text x='202' y='49' text-anchor='middle' font-size='10'>26.5</text><text x='147' y='230' text-anchor='middle' font-size='12'>2 bits</text><rect x='255' y='176' width='34' height='34' fill='#9CA3AF' opacity='.85'/><text x='272' y='172' text-anchor='middle' font-size='10'>5.8</text><rect x='295' y='185' width='34' height='25' fill='#1d4ed8' opacity='.85'/><text x='312' y='181' text-anchor='middle' font-size='10'>4.2</text><rect x='335' y='189' width='34' height='21' fill='#C2410C' opacity='.85'/><text x='352' y='185' text-anchor='middle' font-size='10'>3.5</text><rect x='375' y='128' width='34' height='82' fill='#dc2626' opacity='.85'/><text x='392' y='124' text-anchor='middle' font-size='10'>13.9</text><text x='336' y='230' text-anchor='middle' font-size='12'>3 bits</text><rect x='445' y='201' width='34' height='9' fill='#9CA3AF' opacity='.85'/><text x='462' y='197' text-anchor='middle' font-size='10'>1.6</text><rect x='484' y='204' width='34' height='6' fill='#1d4ed8' opacity='.85'/><text x='501' y='200' text-anchor='middle' font-size='10'>1.0</text><rect x='524' y='205' width='34' height='5' fill='#C2410C' opacity='.85'/><text x='541' y='201' text-anchor='middle' font-size='10'>0.8</text><rect x='564' y='170' width='34' height='40' fill='#dc2626' opacity='.85'/><text x='581' y='166' text-anchor='middle' font-size='10'>6.7</text><text x='525' y='230' text-anchor='middle' font-size='12'>4 bits</text></svg><figcaption>Fig. 3. Mean relative layer error over 21 SmolLM layers. eqmass (red) — a grid with equal probability masses between neighboring levels — loses even to the uniform one; the fitted form wins by −28…−47 %.</figcaption></figure>
+<p>The intuitively attractive idea of "placing levels so that an equal number
+of weights falls between neighbors" (by analogy — optimality for a uniform objective under
+a non-uniform density) has been experimentally refuted: the equal-mass grid gives
+<b>+139 %</b> of error
+against uniform at 3 bits and <b>+331 %</b> at 4
+(Fig. 3; the κ-scale correction — eqmassk — does not save it: +113 %).
+The reason is that equal masses equalize the <em>number</em> of weights in a bin, while the
+quadratic weighted objective pays for <em>distance</em>: densifying toward the modal
+zone without letting the tail steps stretch punishes the heavy tails
+intolerably. The only "fair" compromise — lloydhess (full weighted
+Lloyd without parameterization) — beats our formula by units of a percent of the objective,
+but requires iterations over the whole tensor; the Kumaraswamy formula gives the same result
+in a single compass descent.</p>
+
+<h3>6.6. Fixed "smart" grids: NF4 and FP4 E2M1</h3>
+<p>At equal storage cost, fixed grids lose to fitting, and the ranking is
+informative: NF4 (Gaussian quantiles) — better than uniform (−28 %
+of the objective at 3 bits), but worse than shapeq (−40 %);
+the hardware FP4 E2M1, with its geometric ladder ±{½, 1, 1½, 2, 3, 4, 6}/6,
+is denser than NF4 near zero and coarser in the tails — by our hypothesis it should land between
+uniform and shapeq (the b4 fp4 row in Tables 1–2).</p>
+
+<h3>6.7. Outliers vs group scale</h3>
+<figure class='fig'><svg viewBox='0 0 640 250' width='100%' xmlns='http://www.w3.org/2000/svg' font-family='Georgia,serif'><rect x='52' y='6' width='11' height='11' fill='#9CA3AF'/><text x='67' y='16' font-size='11'>A uniform</text><rect x='182' y='6' width='11' height='11' fill='#C2410C'/><text x='197' y='16' font-size='11'>B fitted</text><rect x='312' y='6' width='11' height='11' fill='#1d4ed8'/><text x='327' y='16' font-size='11'>C symm.</text><rect x='442' y='6' width='11' height='11' fill='#a16207'/><text x='457' y='16' font-size='11'>D manual</text><rect x='66' y='206' width='34' height='4' fill='#9CA3AF' opacity='.85'/><text x='83' y='202' text-anchor='middle' font-size='10'>14.4</text><rect x='106' y='206' width='34' height='4' fill='#C2410C' opacity='.85'/><text x='123' y='202' text-anchor='middle' font-size='10'>14.5</text><rect x='146' y='207' width='34' height='3' fill='#1d4ed8' opacity='.85'/><text x='163' y='203' text-anchor='middle' font-size='10'>10.4</text><rect x='186' y='206' width='34' height='4' fill='#a16207' opacity='.85'/><text x='202' y='202' text-anchor='middle' font-size='10'>15.4</text><text x='147' y='230' text-anchor='middle' font-size='12'>2 bits</text><rect x='255' y='209' width='34' height='1' fill='#9CA3AF' opacity='.85'/><text x='272' y='205' text-anchor='middle' font-size='10'>3.5</text><rect x='295' y='209' width='34' height='1' fill='#C2410C' opacity='.85'/><text x='312' y='205' text-anchor='middle' font-size='10'>3.6</text><rect x='335' y='209' width='34' height='1' fill='#1d4ed8' opacity='.85'/><text x='352' y='205' text-anchor='middle' font-size='10'>2.8</text><rect x='375' y='209' width='34' height='1' fill='#a16207' opacity='.85'/><text x='392' y='205' text-anchor='middle' font-size='10'>3.6</text><text x='336' y='230' text-anchor='middle' font-size='12'>3 bits</text><rect x='445' y='210' width='34' height='0' fill='#9CA3AF' opacity='.85'/><text x='462' y='206' text-anchor='middle' font-size='10'>0.8</text><rect x='484' y='210' width='34' height='0' fill='#C2410C' opacity='.85'/><text x='501' y='206' text-anchor='middle' font-size='10'>0.8</text><rect x='524' y='210' width='34' height='0' fill='#1d4ed8' opacity='.85'/><text x='541' y='206' text-anchor='middle' font-size='10'>0.7</text><rect x='564' y='210' width='34' height='0' fill='#a16207' opacity='.85'/><text x='581' y='206' text-anchor='middle' font-size='10'>0.8</text><text x='525' y='230' text-anchor='middle' font-size='12'>4 bits</text></svg><figcaption>Fig. 4. The absmax group scheme (A), free fp16 scale (B), exact-outlier oracle (C), and the scheme with a low-bit outlier correction (D). M — the metric tr(ΔHΔᵀ)/tr(WHWᵀ), %.</figcaption></figure>
+<p>The hypothesis "reserve the top code for an outlier with a low-bit correction after
+linearization" did not hold: scheme D loses to both baselines (~+6 % of the objective vs B)
+while making the group 0.07–0.09 bit/weight more expensive, and oracle C shows that the ceiling
+of the whole "channel for the outlier" family lies below current solutions — because
+saving a level in the table costs more than the accuracy of one weight per group
+(a 96–128-weight group "buys" outlier accuracy at the price of coarsening the grid for all).</p>
+
+<h3>6.8. Layer errors: summary over 21 layers</h3>
+<table><thead><tr><th>Tier</th><th>kum</th><th>shapeq</th><th>lloyd</th><th>lloydhess</th><th>nf4</th><th>uniform</th></tr></thead><tbody><tr><td>2 bits</td><td>0.1263</td><td>0.0954</td><td>0.1002</td><td>0.0727</td><td>0.1564</td><td>0.2093</td></tr><tr><td>3 bits</td><td>0.0226</td><td>0.0182</td><td>0.0230</td><td>0.0169</td><td>0.0242</td><td>0.0381</td></tr><tr><td>4 bits</td><td>0.0049</td><td>0.0040</td><td>0.0059</td><td>0.0045</td><td>0.0049</td><td>0.0083</td></tr></tbody></table>
+<p class="cap">Table 4. Mean relative layer error tr(ΔHΔᵀ)/tr(WHWᵀ).</p>
+
+<h3>6.9. True 4-bit packing: memory and format accuracy</h3>
+<p>So that the ppl numbers would not remain "fake quantization in fp32", the b4 shapeq
+configuration was assembled as a genuine packed file (<code>https://huggingface.co/RomanPokora/shapeq-q4lut-models</code>): 4-bit codes (two per byte), fp16 group
+scales, a 16×fp16 LUT per tensor. The experiment answers two questions: (1) how much memory the
+format costs and (2) whether LUT dequantization loses anything beyond the error of quantization
+itself. The second answer is exact: the ppl of the packed model and of fake-quant
+(weights snapped to the same grid, computed as fp32) matched to all 14 significant
+digits (Table 5), i.e. all of the ppl damage comes from the 4 bits, not from the runtime.
+<b>Speed was not measured here</b>: a correct speed comparison is given only by a
+mature fused decoder with equal conditions for all methods (including the fixed NF4/IQ4_NL);
+numbers from a homegrown python prototype would characterize the prototype, not the method.
+This measurement was taken in the llama.cpp fork with a kernel for our format
+(<code>https://github.com/stiggigy-jpg/shapeq-q4lut</code>) —
+see the "q4lut" row in Table 7 (§6.11).</p>
+<table><thead><tr><th>Implementation</th><th>linear-layer weights, MB</th><th>ppl (16 chunks)</th><th>process RSS, MB</th></tr></thead><tbody><tr><td>fp32 weights (base)</td><td>425</td><td>28.083</td><td>1477</td></tr><tr><td>b4 packed (codes+LUT, decoded at forward)</td><td>56</td><td>32.961</td><td>978</td></tr><tr><td>fake-quant fp32 (weights snapped to the grid, fp32 path)</td><td>425</td><td>32.961</td><td>—</td></tr></tbody></table><p class='muted'>Packing: 56 MB on disk (~4.18 bit/weight including overhead) vs ≈425 MB for the same 106 million weights in fp32 (×7.7); embeddings are not part of the pack. Quantization + packing of the whole model took 1 529 s. Process RSS drops from 1477 to 978 MB. Greedy generation at ppl≈33 is plausible but thematically smeared and prone to repetition — the expected behavior of a 4-bit weights-only quant on a model of this size.</p>
+<p class="cap">Table 5. SmolLM-135M b4 shapeq: format cost and dequantization accuracy (CPU, batch 1).</p>
+
+<h3>6.10. Full GSQ / RCO mode: mixed-bitness inference</h3>
+<p>The final demonstration of the pipeline end to end: GSQ grid fitting and assignment
+(GPTQ for 4 bits, GPTQ+refit-3 for 3 bits), then RCO — Lagrangian allocation of bitness
+(3, 4) across layers under an average budget. At a budget of 4.0 bits the allocation
+degenerates into uniform 4-bit (a correctness check of the optimizer); at 3.5 — some layers
+get 3 bits without going over budget. Inference uses the packed model (3-bit codes
+packed bitwise, decode via LUT), with the fp32 base on the same chunks for comparison.</p>
+<table><thead><tr><th>Configuration</th><th>layers at 3/4 bits</th><th>bit/weight</th><th>ppl (16 chunks)</th><th>RSS, MB</th><th>pack, MB</th></tr></thead><tbody><tr><td>RCO @ 4.0-bit budget</td><td>{'3': 1, '4': 209}</td><td>4.33</td><td>31.526</td><td>1241</td><td>55</td></tr><tr><td>RCO @ 3.5-bit budget</td><td>{'3': 120, '4': 90}</td><td>3.83</td><td>37.968</td><td>1175</td><td>49</td></tr></tbody></table>
+<p class="cap">Table 6. Full GSQ/RCO mode on SmolLM-135M: quality and memory cost
+(speed is out of scope, as in §6.9).</p>
+
+<h3>6.11. The mature runtime as a scale yardstick</h3>
+<p>To calibrate "what our b4 costs" against industrial quants, the same models were run
+through llama.cpp (CPU-only build, AVX2; corpus — the first 240 KB of WikiText-2,
+ctx 512; ppl via llama-perplexity, speed via llama-bench in one session, -t 6, r=4).
+This is <b>a different corpus and a different pipeline</b>
+than the pytorch section §6.2—6.9, so the numbers are not mixed with Tables 1—6: Table 7
+is self-contained and shows the "size ↔ ppl ↔ speed" frontier of a mature runtime.</p>
+<table><thead><tr><th>Quant (llama.cpp)</th><th>file, MB</th><th>ppl</th><th>pp512, tok/s</th><th>tg128, tok/s</th><th>Δppl vs f16</th></tr></thead><tbody><tr><td colspan='6'><b>SmolLM-135M</b></td></tr><tr><td>f16</td><td>259</td><td>18.12</td><td>322</td><td>51</td><td>—</td></tr><tr><td>Q8_0</td><td>139</td><td>18.18</td><td>353</td><td>87</td><td>+0.3 %</td></tr><tr><td>Q4_K_M</td><td>101</td><td>19.06</td><td>269</td><td>99</td><td>+5.2 %</td></tr><tr><td>IQ4_NL</td><td>88</td><td>20.43</td><td>565</td><td>98</td><td>+12.8 %</td></tr><tr><td>Q4_0</td><td>88</td><td>21.64</td><td>533</td><td>105</td><td>+19.5 %</td></tr><tr><td>Q3_K_M</td><td>90</td><td>20.79</td><td>496</td><td>111</td><td>+14.8 %</td></tr><tr><td>Q2_K</td><td>85</td><td>23.53</td><td>577</td><td>129</td><td>+29.9 %</td></tr><tr><td>q4lut</td><td>114</td><td>20.73</td><td>229</td><td>54</td><td>+14.4 %</td></tr><tr><td>Q2_K+imat</td><td>88</td><td>21.12</td><td>561</td><td>112</td><td>+16.6 %</td></tr><tr><td>Q3_K_M+imat</td><td>93</td><td>19.37</td><td>476</td><td>110</td><td>+6.9 %</td></tr><tr><td>Q4_K_S+imat</td><td>102</td><td>18.87</td><td>276</td><td>108</td><td>+4.1 %</td></tr><tr><td>Q4_K_M+imat</td><td>105</td><td>18.74</td><td>265</td><td>83</td><td>+3.4 %</td></tr><tr><td colspan='6'><b>Qwen2.5-0.5B</b></td></tr><tr><td>f16</td><td>994</td><td>14.09</td><td>92</td><td>13</td><td>—</td></tr><tr><td>Q8_0</td><td>531</td><td>14.12</td><td>113</td><td>28</td><td>+0.2 %</td></tr><tr><td>Q4_K_M</td><td>397</td><td>14.51</td><td>98</td><td>29</td><td>+2.9 %</td></tr><tr><td>IQ4_NL</td><td>354</td><td>15.17</td><td>220</td><td>35</td><td>+7.6 %</td></tr><tr><td>Q4_0</td><td>352</td><td>15.93</td><td>202</td><td>38</td><td>+13.1 %</td></tr><tr><td>Q3_K_M</td><td>355</td><td>15.26</td><td>166</td><td>26</td><td>+8.3 %</td></tr><tr><td>Q2_K</td><td>338</td><td>16.91</td><td>231</td><td>37</td><td>+20.0 %</td></tr><tr><td>Q2_K+imat</td><td>338</td><td>16.40</td><td>241</td><td>33</td><td>+16.4 %</td></tr><tr><td>Q3_K_M+imat</td><td>355</td><td>14.93</td><td>217</td><td>36</td><td>+5.9 %</td></tr><tr><td>Q4_K_S+imat</td><td>385</td><td>14.44</td><td>97</td><td>31</td><td>+2.5 %</td></tr><tr><td>Q4_K_M+imat</td><td>397</td><td>14.36</td><td>100</td><td>29</td><td>+1.9 %</td></tr></tbody></table><p class='muted'>q4lut — our format in the llama.cpp fork (type q4_lut, 4.17 bit/weight in the linear layers, embeddings and norms kept in f16, hence the file is larger than the pure-quant rows). Accuracy matches the pytorch pack (ppl[11] 22.6088 vs the f16-dequant reference 22.606); speed — the first fused-decoder implementation (no repack and no asm); it is below llama.cpp's tuned kernels and is reported as a measure of the format under equal conditions, not as an achievement.</p>
+<p class="cap">Table 7 (continued — the "+imat" rows = k-quants with an importance matrix
+(imatrix), Unsloth-GGUF recipe). Standard llama.cpp quants on a small corpus (pp512 —
+prefill speed, tg128 — decode; without GGML_LLAMAFILE, so tg for some quants is
+understated). Our packed b4 (shapeq) is the "q4lut" row: 55.5 MB of linear layers + f16 embeddings,
+in this same pipeline and on the same runtime (llama.cpp fork with an AVX2 kernel for the format, v3,
+<code>https://github.com/stiggigy-jpg/shapeq-q4lut</code>):
+ppl 20.73 vs 21.64 for Q4_0 at the same byte price; speed −57 % on prefill
+and −49 % on decode against Q4_0 — this is the price of LUT dequantization without repack-GEMM (see §8 on v4).
+The speeds of the whole table were remeasured in one session (-t 6, r=4): the previous values were measured
+under competing load and do not reproduce.</p>
+
+<h3>6.12. Unsloth-style vs RCO: how to rank "whom to save with a bit"</h3>
+<p>Unsloth Dynamic (the XL presets in llama.cpp and their GGUFs on imatrix) distributes bits
+as follows: all tensors go to the target bitness, and the top X% of "important" ones are
+automatically promoted in precision — ranking by tensor importance/error, the percentage
+fixed by the rubric. Our RCO takes tensors by marginal benefit (error drop at +1 bit) up
+to the average budget. We compared both strategies on a proxy metric (mean relative tensor
+error, GPTQ, fitted step — error matrix §6.4) <b>at the same ebw</b>:</p>
+<table><thead><tr><th>base → budget</th><th>allocation method</th><th>ebw</th><th>mean layer error</th><th>bit layout</th></tr></thead><tbody><tr><td colspan='5'><b>SMOLLM</b> · 21 tensors</td></tr><tr><td>b2 → budget 2.6</td><td>uniform bits</td><td>2.33</td><td>3.01 %</td><td>{'2': 21, '3': 0, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 2.6</td><td>top-k by importance (Unsloth ranking)</td><td>2.57</td><td>1.81 %</td><td>{'2': 16, '3': 5, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 2.6</td><td>XL rule: top 16% get +2 bits</td><td>2.62</td><td>1.99 %</td><td>{'2': 18, '3': 0, '4': 3, '5': 0}</td></tr><tr><td>b2 → budget 2.6</td><td>marginal criterion (RCO)</td><td>2.57</td><td>1.81 %</td><td>{'2': 16, '3': 5, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>uniform bits</td><td>2.33</td><td>3.01 %</td><td>{'2': 21, '3': 0, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>top-k by importance (Unsloth ranking)</td><td>3.10</td><td>0.85 %</td><td>{'2': 5, '3': 16, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>XL rule: top 16% get +2 bits</td><td>2.62</td><td>1.99 %</td><td>{'2': 18, '3': 0, '4': 3, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>marginal criterion (RCO)</td><td>3.10</td><td>0.85 %</td><td>{'2': 5, '3': 16, '4': 0, '5': 0}</td></tr><tr><td>b3 → budget 3.4</td><td>uniform bits</td><td>3.33</td><td>0.70 %</td><td>{'2': 0, '3': 21, '4': 0, '5': 0}</td></tr><tr><td>b3 → budget 3.4</td><td>top-k by importance (Unsloth ranking)</td><td>3.38</td><td>0.61 %</td><td>{'2': 0, '3': 20, '4': 1, '5': 0}</td></tr><tr><td>b3 → budget 3.4</td><td>marginal criterion (RCO)</td><td>3.38</td><td>0.61 %</td><td>{'2': 0, '3': 20, '4': 1, '5': 0}</td></tr><tr><td>b3 → budget 3.83</td><td>uniform bits</td><td>3.33</td><td>0.70 %</td><td>{'2': 0, '3': 21, '4': 0, '5': 0}</td></tr><tr><td>b3 → budget 3.83</td><td>top-k by importance (Unsloth ranking)</td><td>3.81</td><td>0.25 %</td><td>{'2': 0, '3': 11, '4': 10, '5': 0}</td></tr><tr><td>b3 → budget 3.83</td><td>marginal criterion (RCO)</td><td>3.81</td><td>0.25 %</td><td>{'2': 0, '3': 11, '4': 10, '5': 0}</td></tr><tr><td>b3 → budget 4.33</td><td>uniform bits</td><td>3.33</td><td>0.70 %</td><td>{'2': 0, '3': 21, '4': 0, '5': 0}</td></tr><tr><td>b3 → budget 4.33</td><td>top-k by importance (Unsloth ranking)</td><td>4.29</td><td>0.16 %</td><td>{'2': 0, '3': 1, '4': 20, '5': 0}</td></tr><tr><td>b3 → budget 4.33</td><td>marginal criterion (RCO)</td><td>4.29</td><td>0.16 %</td><td>{'2': 0, '3': 1, '4': 20, '5': 0}</td></tr><tr><td colspan='5'><b>QWEN</b> · 21 tensors</td></tr><tr><td>b2 → budget 2.6</td><td>uniform bits</td><td>2.25</td><td>2.62 %</td><td>{'2': 21, '3': 0, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 2.6</td><td>top-k by importance (Unsloth ranking)</td><td>2.58</td><td>1.44 %</td><td>{'2': 14, '3': 7, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 2.6</td><td>XL rule: top 16% get +2 bits</td><td>2.54</td><td>1.93 %</td><td>{'2': 18, '3': 0, '4': 3, '5': 0}</td></tr><tr><td>b2 → budget 2.6</td><td>marginal criterion (RCO)</td><td>2.58</td><td>1.44 %</td><td>{'2': 14, '3': 7, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>uniform bits</td><td>2.25</td><td>2.62 %</td><td>{'2': 21, '3': 0, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>top-k by importance (Unsloth ranking)</td><td>3.06</td><td>0.66 %</td><td>{'2': 4, '3': 17, '4': 0, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>XL rule: top 16% get +2 bits</td><td>2.54</td><td>1.93 %</td><td>{'2': 18, '3': 0, '4': 3, '5': 0}</td></tr><tr><td>b2 → budget 3.1</td><td>marginal criterion (RCO)</td><td>3.06</td><td>0.66 %</td><td>{'2': 4, '3': 17, '4': 0, '5': 0}</td></tr><tr><td>b3 → budget 3.4</td><td>uniform bits</td><td>3.25</td><td>0.59 %</td><td>{'2': 0, '3': 21, '4': 0, '5': 0}</td></tr><tr><td>b3 → budget 3.4</td><td>top-k by importance (Unsloth ranking)</td><td>3.39</td><td>0.45 %</td><td>{'2': 0, '3': 18, '4': 3, '5': 0}</td></tr><tr><td>b3 → budget 3.4</td><td>marginal criterion (RCO)</td><td>3.39</td><td>0.45 %</td><td>{'2': 0, '3': 18, '4': 3, '5': 0}</td></tr><tr><td>b3 → budget 3.83</td><td>uniform bits</td><td>3.25</td><td>0.59 %</td><td>{'2': 0, '3': 21, '4': 0, '5': 0}</td></tr><tr><td>b3 → budget 3.83</td><td>top-k by importance (Unsloth ranking)</td><td>3.82</td><td>0.20 %</td><td>{'2': 0, '3': 9, '4': 12, '5': 0}</td></tr><tr><td>b3 → budget 3.83</td><td>marginal criterion (RCO)</td><td>3.82</td><td>0.20 %</td><td>{'2': 0, '3': 9, '4': 12, '5': 0}</td></tr></tbody></table>
+<p class="cap">Table 8. On a tensor-separable metric, ranking "by importance"
+and the marginal criterion give the same layout (both promote the same layers),
+while the rigid XL rule "top 16% gets +2 bits" loses — it pays for a fixed percentage
+at any budget. The true difference between strategies is visible only on a metric
+that does not separate tensors — perplexity: our RCO@3.5 (Table 6) holds
+ppl 37.968 where uniform 3-bit yields a garbage model; the imatrix rows of Table 7
+show the same effect in the mature runtime.</p>
+
+<h3>6.13. All variants at equal bitness: the fp16-GPU ladder for SmolLM</h3>
+<p>To compare all variants at equal bitness (grid × rounding × refit), we ran the full
+8/6/4-bit ladder on the MX250: quantization by the numpy reference, forward pass and
+perplexity in fp16 on GPU. The fp16-GPU base gives 23.358 and matches the fp32 base of
+Tables 1–4 to the third digit; the uniform rows of the two traces also agree (b4: 33.796
+vs 33.806). SHAPEQ diverges by 1.2 ppl (32.618 vs 31.385). The cause is fitting variance
+in the legacy fitter: it fitted the shape to a random subsample, and after fp16 rounding
+the grid shifts, which on a coarse b4 grid flips the rounding decision for some weights.
+The fixed FP4 grid shows no such variance (27.102 vs 27.067). This motivates the
+deterministic histogram fitter of Section 7.7; the legacy numbers are reported as measured.</p>
+<table><thead><tr><th>Configuration</th><th>bit/weight</th><th>WikiText-2 ppl</th><th>vs fp16 gpu</th><th>vs best in its bit-width</th><th>quant., s</th></tr></thead><tbody><tr><td>fp16 gpu</td><td>16.0</td><td><b>23.358</b></td><td class='neg'>—</td><td>—</td><td class='muted'>0</td></tr><tr><td>fp8 e4m3</td><td>8.167</td><td><b>23.569</b></td><td class='neg'>+0.9 %</td><td>—</td><td class='muted'>0</td></tr><tr><td>b8 uniform</td><td>8.333</td><td><b>23.380</b></td><td class='neg'>+0.1 %</td><td>+0.1 %</td><td class='muted'>952</td></tr><tr><td>b8 uniform rtn</td><td>8.333</td><td><b>23.383</b></td><td class='neg'>+0.1 %</td><td>+0.1 %</td><td class='muted'>15</td></tr><tr><td>b8 shapeq</td><td>8.333</td><td><b>23.367</b></td><td class='neg'>+0.0 %</td><td>+0.1 %</td><td class='muted'>2 146</td></tr><tr><td>b8 shapeq rtn</td><td>8.333</td><td><b>23.350</b></td><td class='neg'>±0.0 %</td><td><b>best</b></td><td class='muted'>1 182</td></tr><tr><td>b8 shapeq+refit3</td><td>8.333</td><td><b>23.369</b></td><td class='neg'>+0.0 %</td><td>+0.1 %</td><td class='muted'>5 389</td></tr><tr><td>b6 uniform</td><td>6.333</td><td><b>23.679</b></td><td class='neg'>+1.4 %</td><td>+0.8 %</td><td class='muted'>314</td></tr><tr><td>b6 uniform rtn</td><td>6.333</td><td><b>24.097</b></td><td class='neg'>+3.2 %</td><td>+2.5 %</td><td class='muted'>14</td></tr><tr><td>b6 uniform_k</td><td>6.333</td><td><b>90.559</b></td><td class='pos'>×3.9</td><td>+285.3 %</td><td class='muted'>349</td></tr><tr><td>b6 shapeq</td><td>6.333</td><td><b>23.502</b></td><td class='neg'>+0.6 %</td><td><b>best</b></td><td class='muted'>1 276</td></tr><tr><td>b6 shapeq rtn</td><td>6.333</td><td><b>23.634</b></td><td class='neg'>+1.2 %</td><td>+0.6 %</td><td class='muted'>837</td></tr><tr><td>b6 shapeq+refit3</td><td>6.333</td><td><b>23.525</b></td><td class='neg'>+0.7 %</td><td>+0.1 %</td><td class='muted'>4 724</td></tr><tr><td>b4 uniform</td><td>4.333</td><td><b>33.796</b></td><td class=''>+44.7 %</td><td>+29.6 %</td><td class='muted'>313</td></tr><tr><td>b4 uniform rtn</td><td>4.333</td><td><b>43.846</b></td><td class='pos'>+87.7 %</td><td>+68.1 %</td><td class='muted'>17</td></tr><tr><td>b4 uniform_k</td><td>4.333</td><td><b>1 665.275</b></td><td class='pos'>×71.3</td><td>+6284.0 %</td><td class='muted'>429</td></tr><tr><td>b4 shapeq</td><td>4.333</td><td><b>32.618</b></td><td class=''>+39.6 %</td><td>+25.0 %</td><td class='muted'>717</td></tr><tr><td>b4 shapeq rtn</td><td>4.333</td><td><b>28.747</b></td><td class=''>+23.1 %</td><td>+10.2 %</td><td class='muted'>601</td></tr><tr><td>b4 shapeq+refit3</td><td>4.333</td><td><b>27.228</b></td><td class=''>+16.6 %</td><td>+4.4 %</td><td class='muted'>1 863</td></tr><tr><td>b4 fp4</td><td>4.333</td><td><b>27.102</b></td><td class=''>+16.0 %</td><td>+3.9 %</td><td class='muted'>181</td></tr><tr><td>b4 fp4 rtn</td><td>4.333</td><td><b>28.941</b></td><td class=''>+23.9 %</td><td>+10.9 %</td><td class='muted'>12</td></tr><tr><td>b4 shapeq unsloth16</td><td>4.648</td><td><b>30.127</b></td><td class=''>+29.0 %</td><td>+15.5 %</td><td class='muted'>959</td></tr><tr><td>b4 shapeq marg16</td><td>4.648</td><td><b>33.115</b></td><td class=''>+41.8 %</td><td>+27.0 %</td><td class='muted'>2 242</td></tr><tr><td>b4 shapeq rco3.5</td><td>3.835</td><td><b>31.937</b></td><td class=''>+36.7 %</td><td>+22.4 %</td><td class='muted'>2 339</td></tr><tr><td>b6 shapeq rco5.5</td><td>5.833</td><td><b>25.144</b></td><td class=''>+7.6 %</td><td>+7.0 %</td><td class='muted'>3 354</td></tr></tbody></table>
+<p class="cap">Table 9. SmolLM-135M, fp16-GPU base: the full cross of variants at equal
+bitness (b4 group: 10 configurations). The "in its own bitness" column — relative to the best in the group.</p>
+
+<p>The b4 group reverses the usual rounding hierarchy, but only on this model. On the
+warped SHAPEQ grid, GPTQ compensation <em>hurts</em>: RTN gives 28.747 against 32.618 for
+GPTQ, whereas at b6 and b8 the order is opposite. On the fixed FP4 grid GPTQ helps
+(27.102 vs 28.941): error feedback appears to break against the fitted grid and its long
+shelves. Qwen2.5-0.5B shows no reversal on the same numerical trace (b4 SHAPEQ RTN 19.389
+vs 19.225 for GPTQ, within fitting variance), so this is a property of the specific
+model–grid pair, not a general law. Refit (SHAPEQ+refit3) reaches 27.228, level with FP4
+on this trace; on the fp32 ladder (Table 1) the edge is clearer: 25.924 vs 27.067 for FP4
+(−4.2 %). At 6–8 bits refit adds nothing (b6: 23.525 vs 23.502): the grid is already close
+to optimal.</p>
+
+<p>Mixed-bitness allocation does not change this picture. At an equal budget of 4.65
+effective bits, the Unsloth XL rubric (top 16 % of tensors by H-weighted error promoted by
++2 bits) gives 30.127 and the marginal criterion 33.115; both lose to whole-grid
+SHAPEQ+refit3 at 4.33 bits (27.228). Part of the gap comes from the GPTQ base, which loses
+to RTN on this grid, but the ordering is stable. Pure RCO allocation (3/4 bits) at a
+smaller budget of 3.835 bits gives 31.937 — better than uniform b4 GPTQ (32.618) but worse
+than plain RTN (28.747); the fp32 ladder reproduces the result (31.372 vs 31.385 at
+4.33 bits). Bit allocation does not repair GPTQ compensation on the fitted grid; a cheap
+whole-grid refit does.</p>
+
+
+<h3>6.14. The cost of the table at decode: "scale-only" vs LUT dequantization</h3>
+<p>Inference engines love table-free formats: decode w = s&middot;q — one FMA per weight,
+no gather and no 32 bytes of fp16 per tensor. We measured the price of such a simplification on the main
+protocol (fp32 trace, gptq rounding, group 96/128): the same 4-bit depth and three
+families of decodes — <b>scale-only</b> (symmetric uniform grid, Q4_0-style,
+"uniform_k"), <b>scale with shift</b> (Q4_1-style, "uniform") and <b>full
+dequantization via the fitted table</b> (our method):</p>
+<table><thead><tr><th>Decode (4 bits/weight)</th><th>SmolLM-135M</th><th>Qwen2.5-0.5B</th></tr></thead><tbody><tr><td>scale only (no LUT)</td><td><b>345.5</b></td><td>159.3</td></tr><tr><td>scale + shift (no LUT)</td><td><b>33.81</b></td><td>22.65</td></tr><tr><td>LUT of the fitted grid</td><td><b>26.00</b></td><td>19.23</td></tr></tbody></table>
+<p class="cap">Table 9b. The price of dropping the LUT at an equal bit budget (WikiText-2 ppl,
+fp32 trace; SmolLM group 96, Qwen group 128). Uniform grids do not depend on the fitting
+engine (they are fixed), the rows are from the fp32-CPU traces; the SmolLM LUT row is from the hist era, Qwen from
+the legacy ladder. For reference: on the rtn trace the drop is cheaper (Qwen b4 uniform_k rtn 55.65), but
+it fails too; fp32 base: 23.36 / 19.37.</p>
+<p>At 4 bits "scale-only" costs ×13 ppl on SmolLM (345.5 vs 26.0) and
+×8 on Qwen; almost everything is lost not by the table as such but by the zero shift — with a
+shift the uniform grid gets to +30 %/+17 % over the base. But at 3 bits without a table the model
+is no longer salvageable by anything: 29 068 vs 52.6 with the LUT (×553). For a
+practitioner: a table of 16 levels costs 32 bytes per tensor and one gather in the
+decoder — and it is what keeps the model on coherent text at 4 bits; "pure
+Q4_0 on our own indices" is a saving that pays with an order of magnitude of ppl.</p>
+
+<h2>7. Discussion</h2>
+
+<h3>7.1. Why the shape works: high-rate quantization theory vs. equal mass</h3>
+<p>The classical quantization asymptotics for the error order r=2
+prescribes a level density λ(x) ∝ p(x)<sup>1/3</sup> — where p is the data
+density (Zador's high-resolution quantization result as presented by Gersho [16]).
+A uniform grid takes λ = const (under-packed at the mode); an equal-mass one —
+λ ∝ p (exponent 1 instead of 1/3). That is why eqmass is not "nearly
+optimal" but worse than uniform (Section 6.5): it packs levels at the mode too
+densely and pays with distances in the tails, and a quadratic objective pays with the
+square of the distance. The Kumaraswamy family is not, strictly speaking, a family of p<sup>1/3</sup>-grids,
+but its two-parameter bends cross the required profile freely — and, unlike
+the theorem, they work at small L (16 levels is not asymptotics) and with a weighted,
+not uniform, objective.</p>
+
+<h3>7.2. Hessian weighting</h3>
+<p>The diagonal of the Hessian is the mean squared channel activation; weighting by it
+tells the grid where an error hurts most: channels through which large signals pass (the
+well-known source of outlier trouble — LLM.int8 [5]) receive a denser grid. The full
+matrix H is left out of the fit: off-diagonal crossings are already handled by
+the GPTQ compensation, and the fit-matrix experiments showed an almost complete agreement of the
+diag(H) objective with the full quadratic form. The name SHAPEQ denotes the two ingredients
+of the method: a <em>shape</em> fitted per tensor, and <em>quantization</em> that keeps the
+existing code and scale machinery.</p>
+
+<h3>7.3. Parametrics vs. Lloyd</h3>
+<p>The non-parametric lloydhess beats the formula by 1–2 % of the objective — and we
+give up these percents: 4 parameters fitted over 150k points are a
+hard regularization; they do not overfit calibration noise and give equally
+predictable behavior on all tensors (full Lloyd on "skinny" groups sometimes
+drops levels into empty bins). Refit (Alg. 2) is a dosed compromise: 3 rounds
+of Lloyd over the formula gave −25 % ppl at b3 and almost nothing at b4: the fewer levels,
+the more polishing is worth it.</p>
+
+<h3>7.4. Where this plugs in</h3>
+<p>The method changes the alphabet, not the pipeline: the decode stays a table lookup (like
+IQ4_NL [15]), so the cost is equal and the quality is above fixed alphabets.
+Rotation methods (QuIP [7]) fight the same problem — non-isotropy and tails — by
+rotating the weight space; this is an orthogonal lever, and the combination "rotation +
+fitted shape" is the natural next step. There is no competition with hardware FP4/MX [14]:
+they pay off in the compute-bound W4A4 regime, our method — in the
+memory-bound weight-only one, where a table of 16 fp16 numbers per tensor costs nothing. Our data also
+suggest a "shape library" compromise: keep K=8…16
+pre-fitted tables per layer type and pick one for the group with a 3-bit pointer —
+a price of ~0.05 bits/weight instead of 0.0006 bits per tensor, should LUT memory ever
+become a problem.</p>
+
+<h3>7.5. Economic framing</h3>
+<p>Shape fitting is one-off: &lt;1 s per tensor at quantization time (a full model run —
+minutes), storage — 32 B per tensor, inference — unchanged. The gain concentrates
+in the 2–4-bit zone, where the bit hunt happens: at 4 bits this is −4.2 ppl on Qwen (22.6 → 19.2,
+twice as close to the fp16 loss); at 3 bits it moves a configuration from "model broken"
+to "model works" (55 703 → 68.5). At 8 bits the shape, as theory predicts,
+is almost unnecessary — the 8/6-bit ladder (rows in progress) probes the saturation point.</p>
+
+<h3>7.6. Plugging into the GSQ / RCO pipeline</h3>
+<p>The method is designed as a stage of the existing GSQ / RCO quantization
+pipeline (our GSQ pipeline; in this paper GSQ is
+represented by its assignment core — GPTQ alternating with table refit, RCO — a Lagrangian
+2/3-bit allocation across layers under an exact budget). The integration changes
+neither the file format nor the decoder: (1) table fitting inserts before assignment as one new
+stage (fractions of a second per tensor with the compass-descent fit, seconds — with refit; the calibration
+run for the immatrix/GPTQ is already shared); (2) GSQ assignment works on the fitted
+grid as on a parameter — the code and masks do not change; (3) for RCO the LUT cost (32 B per
+tensor) is noise in the budget problem, and layer ranking by proxy error
+only benefits from a uniform alphabet. The synergy hypothesis: RCO, distributing bits
+across layers, gets a fairer layer comparison when all layers share one grid
+methodology; testing it is planned.</p>
+
+<h3>7.7. A histogram instead of a subsample</h3>
+<p>The original fitter (fit_warp, fit_scale, weighted_lloyd) rotated parameters over a
+random 150k-point subsample, seeded from the tensor hash. This is cheap but introduces
+result variance and a cost linear in tensor size. The current fitter builds a weighted
+histogram of group values (8192 bins) once in O(n); each trial then costs O(bins), while
+the objective is unchanged up to a bin bias of order (bin width)<sup>2</sup>/12. On real
+tensors and heavy-tailed synthetic data the histogram grids are no worse (worst deviation
++0.01 %, typically 0.5–4 % better), the result is fully deterministic, and fitting is
+1.3–16× faster. On the model, SmolLM b4 takes 66 s instead of 1039 s; perplexity changes
+by −4.9 % on SmolLM b4 (27.047 vs 28.440), −0.8 % on Qwen b6 and +0.8 % on Qwen b4 (the
+last within the old subsample variance). Three independent implementations (OpenCL, host
+numpy, VM numpy) agree within 0.40 %. Since 19 November 2026 the histogram path is the
+default; QB_LEGACY_FIT=1 reproduces the old one, and all numbers measured on it are
+reported as measured.</p>
+
+<h3>7.8. Reproducing RCO: bit allocation over our grid</h3>
+<p>The RCO method (Helcig and Alistarh, 2026 [17]) allocates bit widths across layers on
+an exact-budget manifold by optimizing a layered discrete Gumbel-softmax. We reproduced
+its quantize–search–checkpoint stage on CPU (gloo and a device patch), with 32×2048
+calibration tokens and 60 search steps instead of 300. The search took about 22 hours of
+a single-threaded slot and was limited by the 7.6 GB RAM of the machine.</p>
+<p><b>Allocation.</b> Both learned allocations degenerated to two extreme widths: at a
+3.5-bit target, 155 layers at 3 bits and 55 at 5 bits; at 4.0 bits, 104 layers at 3, one
+at 4 and 105 at 5. At the top of a linear budget the simplex vertex wins, so no
+intermediate width appears.</p>
+<p><b>Numerical failure in the CPU reproduction.</b> The OBQ stage silently diverged:
+4-bit scales were inflated 7.7-fold, the dequantized norm exceeded the weight norm by
+1.64×, per-layer NMSE reached 2.07 (worse than a zero approximation), and the search
+objective started at 10.9 against a fp32 cross-entropy of 3.2. OBQ error feedback scales
+by chol(H<sup>−1</sup>) and explodes on a degenerate Hessian; the Hessians are not
+persistent, so the basis cannot be recovered from the corrupted database. This is not an
+upstream defect — their GPU pipeline agrees — but a reproduction should check the NMSE of the
+fake-quant checkpoint before launching the search.</p>
+<p><b>The useful comparison</b> is not their quantizer against ours (broken above), but
+their bit allocation over our grid and rounding (Table 10, protocol of Table 1, group 96).</p>
+<table><thead><tr><th>Configuration</th><th>bit/weight</th><th>ppl (legacy fit)</th><th>ppl (hist fit)</th></tr></thead>
+<tbody><tr><td>uniform 4 bits (our grid, no refit)</td><td>4.33</td><td><b>31.39</b></td><td>26.00</td></tr><tr><td>RCO allocation 3.5 (our grid)</td><td>3.83</td><td><b>32.27</b></td><td>32.27</td></tr><tr><td>RCO allocation 4.0 (our grid)</td><td>4.33</td><td><b>29.74</b></td><td>29.74</td></tr><tr><td>RCO allocation 4.0 + refit-3</td><td>4.33</td><td><b>29.16</b></td><td>—</td></tr><tr><td>uniform 4 bits + refit-3</td><td>4.33</td><td><b>25.92</b></td><td>26.22</td></tr></tbody></table>
+<p class="cap">Table 10. RCO bit allocation over our grid (SmolLM-135M, WikiText-2).
+Without refit the legacy and histogram fits agree to the third digit. With refit the
+histogram engine is slightly worse (26.22 vs 25.92): histogram fitting already exhausts the
+table's degrees of freedom, and a Lloyd step under a different weighting only spoils them.</p>
+<p>At equal 4.33 effective bits the RCO allocation without refit beats flat 4 bits (29.74
+vs 31.39). Refit over the flat allocation gives −2 % (29.16), while refit over a flat bit
+width gives −17 % (25.92). Flat 4 bits plus refit is therefore cheaper and better than RCO
+allocation plus refit. The allocation spends budget on 5-bit layers with small marginal
+gain, and the 104 three-bit layers are not rescued by refit; refit also flattens per-layer
+differences, so the allocator's lever degenerates. This refines Conclusion 7: the synergy
+appears at the grid-methodology level (Section 7.6), not at the level of adding bits.</p>
+
+<h3>7.9. Mass-balance ternary quantization: theory, scan, negative result</h3>
+<p><b>Ternary negative result.</b> We also tested whether assigning weights to
+{−1, 0, +1} with equal masses per level [18] plus a three-value group LUT gives a usable
+weight-only PTQ at ≈1.9 bits. On all 210 SmolLM layers (group 96, MSE proxy),
+nearest-level assignment gives NMSE 0.1893; equal thirds 0.2136 (12.9 % worse); the best
+outer-level share p=0.26 gives 0.1970, and even a per-group oracle over p (0.1916) does
+not reach nearest level. The optimum p≈0.26 matches the Gaussian level-density law
+(22–28 % on the outer levels), so equal thirds is optimal only under the Gaussian prior.
+End-to-end on Qwen2.5-0.5B (fp32, group 128, Table 11) pure ternary loses about three
+orders of magnitude of perplexity at a weight NMSE of 0.19–0.23, and the arm order
+repeats the MSE order. Ternary quantization therefore needs training or activation
+awareness; pure assignment is not enough.</p>
+<table><thead><tr><th>Arm</th><th>weight NMSE</th><th>WikiText-2 ppl</th><th>vs base</th></tr></thead>
+<tbody><tr><td>fp32 base</td><td>0.0000</td><td><b>13.05</b></td><td>—</td></tr>
+<tr><td>nearest level</td><td>0.2009</td><td><b>80 365</b></td><td>6 158×</td></tr>
+<tr><td>share p=0.26</td><td>0.2083</td><td><b>81 337</b></td><td>6 232×</td></tr>
+<tr><td>equal thirds (1/3)</td><td>0.2297</td><td><b>229 286</b></td><td>17 570×</td></tr></tbody></table>
+<p class="cap">Table 11. Ternary arms on Qwen2.5-0.5B; the perplexity order repeats the
+weight-MSE order. The base NMSE is the fp32 error against itself.</p>
+<h2>8. Limitations</h2>
+<ul>
+<li>Scope: two small models (0.135B and 0.5B parameters) and one dataset (WikiText-2).
+Calibration and evaluation use the same corpus, which is standard GPTQ practice but leaves
+a risk of self-overfitting. Transfer to 7B+ models and to HellaSwag/MMLU-class tasks is
+not established.</li>
+<li>The Hessian is stale: it is not rebuilt after quantization. On degraded configurations
+this works against the method, but the size of the distortion was not measured.</li>
+<li>Decode speed is not claimed. A fair tokens-per-second comparison needs one mature fused
+decoder for all methods; a Python prototype would describe the prototype. The llama.cpp
+fork in Section 6.11 is a reference kernel, not an optimized one: LUT decoding is 2.3×
+slower than Q4_0 on prefill and 1.9× slower on decode, and closing that gap requires a
+repack-GEMM path. Only the memory cost of the format is measured (Table 5).</li>
+<li>The b2 rung shows the monotonicity of the effect; none of the b2 configurations is
+practically usable.</li>
+<li>AWQ scaling and sparse corrections (SpQR) were not compared at equal cost; those runs
+are planned.</li>
+<li>The legacy fitter used a random 150k subsample, so b4 perplexity varies between runs:
+SmolLM b4 SHAPEQ was observed in 31.4–38.6 (±10 %). At 3 bits the spread is far smaller
+than the gap between methods, so the uniform↔SHAPEQ result (×30…×550) is robust, but
+single b4 numbers should be read as "a few percent to tens of percent", not to the second
+digit. The histogram fitter (Section 7.7) removes the source: the grid becomes an exact
+function of the tensor. Numbers from the old path are reported as measured.</li>
+<li>The RCO reproduction deviates from the original protocol (CPU, 32×2048 calibration,
+60 search steps). The OBQ divergence is not localized, so Table 10 compares our grid over
+their allocation, not their full method. The ternary result uses one model.</li>
+</ul>
+
+<h2>9. Conclusions</h2>
+<ol>
+<li>Grid shape is an independent and cheap quality lever in weight-only quantization.
+Fitting four parameters per tensor costs 32 B of storage and under a second of CPU time,
+and yields from −7…−15 % perplexity at 4 bits to orders of magnitude at 3 bits against a
+uniform grid at equal cost.</li>
+<li>The effect reproduces on different architectures and grows as the bit width shrinks;
+at 8 bits, as the asymptotics predict, it tends to zero.</li>
+<li>Equal-mass grids, although intuitively optimal, are 31–331 % worse than uniform ones.
+The result is consistent with over-concentration relative to Zador's
+p<sup>1/3</sup> level-density law.</li>
+<li>Fixed smart grids (NF4, FP4 E2M1) lose to per-tensor fitting: one shape for all
+tensors carries a constant quality tax.</li>
+<li>Shape and GPTQ compensation add up; Lloyd refit amplifies the shape at low bit
+widths.</li>
+<li>The fitted shape justifies the LUT decode: dropping the table in favor of "scale
+only" at 4 bits costs ×8…×13 perplexity, and at 3 bits the model is not saved at all
+(×553). The compromise with a group shift (Q4_1-style) costs +17…+30 % perplexity
+(Section 6.14).</li>
+<li>The method is a ready-made stage of a GSQ/RCO pipeline: table fitting before
+assignment, with no change to the file format or the decoder. With RCO's per-bit
+allocation the gain does not add up (Section 7.8).</li>
+<li>The method is deterministic, needs no training, and changes only the quantization
+alphabet, so it composes with existing quantizers. The next steps are validation on 7B+
+models and broader benchmarks, comparison with AWQ and sparse corrections, and an
+optimized LUT kernel with a repack-GEMM path.</li>
+</ol>
+
+<h2>References</h2>
+<ol class="refs">
+<li>Frantar E., Ashkboos S., Hoefler T., Alistarh D. GPTQ: Accurate Post-Training
+Quantization for Generative Pre-trained Transformers. ICLR 2023. arXiv:2210.17323.</li>
+<li>Lin J., Tang J., Tang H. et al. AWQ: Activation-aware Weight Quantization for
+LLM Compression and Acceleration. MLSys 2024. arXiv:2306.00978.</li>
+<li>Dettmers T., Pagnoni A., Holtzman A., Zettlemoyer L. QLoRA: Efficient Finetuning
+of Quantized LLMs. NeurIPS 2023. arXiv:2305.14314.</li>
+<li>Kim S., Hooper C., Gholami A. et al. SqueezeLLM: Dense-and-Sparse Quantization.
+ICML 2024. arXiv:2306.07629.</li>
+<li>Dettmers T., Lewis M., Belkada Y., Zettlemoyer L. LLM.int8(): 8-bit Matrix
+Multiplication for Transformers at Scale. NeurIPS 2022. arXiv:2208.07339.</li>
+<li>Dettmers T., Svirschevski R., Egiazarian V. et al. SpQR: A Sparse-Quantized
+Representation for Near-Lossless LLM Weight Compression. ICLR 2024. arXiv:2306.03078.</li>
+<li>Chee J., Cai Y., Kuleshov V., De Sa C. QuIP: 2-Bit Quantization of Large Language
+Models With Guarantees. NeurIPS 2023. arXiv:2307.13304.</li>
+<li>Lloyd S. P. Least Squares Quantization in PCM. IEEE Trans. Inf. Theory, 1982,
+v. 28, n. 2 (reprint of the 1957 Harvard doctoral dissertation).</li>
+<li>Max J. Quantizing for Minimum Distortion. IRE Trans. Inf. Theory, 1960, v. 6,
+n. 1, p. 7–8.</li>
+<li>Kumaraswamy P. A generalized probability density function for double-bounded
+random processes. Journal of Hydrology, 1980, v. 46, n. 1–2, p. 79–88.</li>
+<li>Merity S., Xiong C., Bradbury J., Socher R. Pointer Sentinel Mixture Models.
+ICLR 2017. arXiv:1609.07843.</li>
+<li>Yang A., Yang B., Zhang B. et al. Qwen2.5 Technical Report. arXiv:2412.15115 (2024).</li>
+<li>Allal L.-B., Lozhkov A., Tunstall L. et al. SmolLM — blazingly fast and remarkably
+powerful. Hugging Face blog, Jul 16, 2024 (model HuggingFaceTB/SmolLM-135M).</li>
+<li>Rouhani B. D., Nasr M., Lou A. et al. Microscaling Data Formats for Deep Learning
+(MXFP8/MXFP4). arXiv:2310.10537 (2023).</li>
+<li>Gerganov G., llama.cpp contributors. llama.cpp: the GGUF format and the
+K-quant / IQ4_NL quantization schemes. Open source, github.com/ggml-org/llama.cpp, 2023–2025.</li>
+<li>Gersho A. Asymptotically Optimal Block Quantization. IEEE Trans. Inf. Theory,
+1979, v. IT-25, n. 4, p. 373–380.</li>
+<li>Helcig F., Alistarh E. Model Compression with Exact Budget Constraints via Riemannian Manifolds. arXiv:2605.00649 (2026). Implementation IST-DASLab/RCO.</li>
+<li>Yvinec O., Dapogny P., Bailly B. Designing strong baselines for ternary neural network quantization through support and mass equalization. arXiv:2306.17442 (2023).</li>
+</ol>
+
+<h2>Appendix A. Reproducibility</h2>
+<p>Reference implementation: Python 3 with numpy float64 on CPU; GPTQ and Hessian
+caching also run in float64. The grid fitter, the packing script, the evaluation
+drivers, and all raw CSV/JSON artifacts are in <code>https://github.com/stiggigy-jpg/shapeq-paper</code>.
+The Q4_LUT/Q4_LUT64 kernels are at <code>https://github.com/stiggigy-jpg/shapeq-q4lut</code>; the packed GGUFs
+and fitted packs are at <code>https://huggingface.co/RomanPokora/shapeq-q4lut-models</code>, with hashes in
+<code>SHA256SUMS.txt</code>. The SmolLM pack uses the legacy engine; the Qwen pack
+uses the histogram engine. A rerun is gated by those hashes and by the perplexity
+and greedy-64 anchors in <code>b4_qwen_shapeq.pt.json</code>.</p>
+<pre class="algo">python fit_b4.py --model HuggingFaceTB/SmolLM-135M --engine legacy --test-chunks 96 \\
+    --out b4_smollm_shapeq.pt
+python fit_b4.py --model Qwen/Qwen2.5-0.5B --dtype fp16 --group 64 --test-chunks 16 \\
+    --out b4_qwen_shapeq.pt
+python pack_q4lut.py --pack b4_smollm_shapeq.pt \\
+    --base smollm-f16.gguf --out smollm-135m-q4lut.gguf
+python run_ppl_grid.py --model HuggingFaceTB/SmolLM-135M --engine legacy \\
+    --out results_ppl.csv</pre>
+<p>Environment used for the reported numbers: WSL2, Linux kernel 5.15, 12 CPU cores,
+7.6 GB RAM, 2 GB swap; NVIDIA MX250 2 GB (CUDA 11.8, torch 2.4.1+cu118) for GPU
+perplexity only. The GPU perplexity evaluation was cross-checked against CPU
+(17.067 vs 17.066). The GPU quantization gate required weighted layer-error
+divergence ≤ 0.03 %. Absolute perplexity can shift in the last decimal or two with
+BLAS reduction order.</p>
+<p>Artifacts: <code>results_ppl.csv</code>, <code>results_ppl_qwen.csv</code>,
+<code>results_layers.csv</code>, the probe JSON files, the ternary scans, and the RCO
+search configurations. <code>results/MANIFEST.md</code> maps each file to a table and a
+regeneration command.</p>
+
+<footer>Preprint, November 2026 · Roman S. Pokora · Independent researcher · <a href="https://orcid.org/0009-0007-4468-5266">ORCID 0009-0007-4468-5266</a></footer>
+</body></html>
