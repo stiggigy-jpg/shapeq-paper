@@ -1,0 +1,7 @@
+model,config,ebw,quant_s,ppl,ppl_loss_vs_fp32,sec,layers_2bit,layers_3bit
+SmolLM-135M,fp16,16.0,0,23.07,0.0,0,,
+SmolLM-135M,b4 shapeq rtn,4.333,1039.0,28.44,0.23277,0,,
+SmolLM-135M,b4 uniform rtn,4.333,8.0,42.733,0.85232,0,,
+SmolLM-135M,b4 fp4 rtn,4.333,11.0,28.712,0.24456,0,,
+SmolLM-135M,b2 lloyd rtn hist,2.333,113.0,51522.347,2232.30504,1025.0,,
+SmolLM-135M,b3 lloyd rtn hist,3.333,185.0,68.636,1.97511,999.0,,

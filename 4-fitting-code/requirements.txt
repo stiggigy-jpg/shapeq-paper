@@ -1,0 +1,4 @@
+torch>=2.4
+transformers>=5.0
+datasets>=3.0
+numpy>=1.26

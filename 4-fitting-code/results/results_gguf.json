@@ -1,0 +1,194 @@
+[
+ {
+  "model": "qwen05b",
+  "quant": "IQ4_NL",
+  "size_mb": 354,
+  "wiki2_ppl": "15.1661",
+  "pp512_tps": 220.24,
+  "tg128_tps": 35.21
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q2_K",
+  "size_mb": 338,
+  "wiki2_ppl": "16.9120",
+  "pp512_tps": 230.83,
+  "tg128_tps": 37.0
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q3_K_M",
+  "size_mb": 355,
+  "wiki2_ppl": "15.2571",
+  "pp512_tps": 166.03,
+  "tg128_tps": 25.87
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q4_0",
+  "size_mb": 352,
+  "wiki2_ppl": "15.9323",
+  "pp512_tps": 201.8,
+  "tg128_tps": 37.54
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q4_K_M",
+  "size_mb": 397,
+  "wiki2_ppl": "14.5072",
+  "pp512_tps": 98.17,
+  "tg128_tps": 28.57
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q8_0",
+  "size_mb": 531,
+  "wiki2_ppl": "14.1235",
+  "pp512_tps": 112.84,
+  "tg128_tps": 27.96
+ },
+ {
+  "model": "qwen05b",
+  "quant": "f16",
+  "size_mb": 994,
+  "wiki2_ppl": "14.0927",
+  "pp512_tps": 91.72,
+  "tg128_tps": 13.41
+ },
+ {
+  "model": "smollm",
+  "quant": "IQ4_NL",
+  "size_mb": 88,
+  "pp512_tps": 565.12,
+  "tg128_tps": 97.56,
+  "wiki2_ppl": "20.4282",
+  "bench": "build: 5297534 (1)"
+ },
+ {
+  "model": "smollm",
+  "quant": "Q2_K",
+  "size_mb": 85,
+  "pp512_tps": 577.21,
+  "tg128_tps": 129.13,
+  "wiki2_ppl": "23.5349",
+  "bench": "build: 5297534 (1)"
+ },
+ {
+  "model": "smollm",
+  "quant": "Q3_K_M",
+  "size_mb": 90,
+  "pp512_tps": 495.9,
+  "tg128_tps": 111.32,
+  "wiki2_ppl": "20.7919",
+  "bench": "build: 5297534 (1)"
+ },
+ {
+  "model": "smollm",
+  "quant": "Q4_0",
+  "size_mb": 88,
+  "pp512_tps": 532.72,
+  "tg128_tps": 104.75,
+  "wiki2_ppl": "21.6431",
+  "bench": "build: 5297534 (1)"
+ },
+ {
+  "model": "smollm",
+  "quant": "Q4_K_M",
+  "size_mb": 101,
+  "pp512_tps": 268.98,
+  "tg128_tps": 98.57,
+  "wiki2_ppl": "19.0627",
+  "bench": "build: 5297534 (1)"
+ },
+ {
+  "model": "smollm",
+  "quant": "Q8_0",
+  "size_mb": 139,
+  "pp512_tps": 352.68,
+  "tg128_tps": 87.19,
+  "wiki2_ppl": "18.1808",
+  "bench": "build: 5297534 (1)"
+ },
+ {
+  "model": "smollm",
+  "quant": "f16",
+  "size_mb": 259,
+  "pp512_tps": 321.66,
+  "tg128_tps": 50.7,
+  "wiki2_ppl": "18.1178",
+  "bench": "build: 5297534 (1)"
+ },
+ {
+  "model": "smollm",
+  "quant": "q4lut",
+  "size_mb": 114,
+  "wiki2_ppl": 20.7306,
+  "pp512_tps": 229.18,
+  "tg128_tps": 53.69,
+  "note": "our q4_lut type (llama.cpp fork, 4.17 bits/weight on linear layers; f16 embeddings); first fused decoder without repack/asm, so speed is not comparable with tuned kernels"
+ },
+ {
+  "model": "smollm",
+  "quant": "Q2_K+imat",
+  "size_mb": 88,
+  "wiki2_ppl": 21.1205,
+  "pp512_tps": 561.19,
+  "tg128_tps": 112.28
+ },
+ {
+  "model": "smollm",
+  "quant": "Q3_K_M+imat",
+  "size_mb": 93,
+  "wiki2_ppl": 19.3727,
+  "pp512_tps": 476.26,
+  "tg128_tps": 110.37
+ },
+ {
+  "model": "smollm",
+  "quant": "Q4_K_S+imat",
+  "size_mb": 102,
+  "wiki2_ppl": 18.8671,
+  "pp512_tps": 276.36,
+  "tg128_tps": 108.02
+ },
+ {
+  "model": "smollm",
+  "quant": "Q4_K_M+imat",
+  "size_mb": 105,
+  "wiki2_ppl": 18.7393,
+  "pp512_tps": 265.28,
+  "tg128_tps": 83.34
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q2_K+imat",
+  "size_mb": 338,
+  "wiki2_ppl": 16.3996,
+  "pp512_tps": 240.67,
+  "tg128_tps": 33.43
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q3_K_M+imat",
+  "size_mb": 355,
+  "wiki2_ppl": 14.9269,
+  "pp512_tps": 216.88,
+  "tg128_tps": 36.11
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q4_K_S+imat",
+  "size_mb": 385,
+  "wiki2_ppl": 14.4414,
+  "pp512_tps": 96.92,
+  "tg128_tps": 31.2
+ },
+ {
+  "model": "qwen05b",
+  "quant": "Q4_K_M+imat",
+  "size_mb": 397,
+  "wiki2_ppl": 14.3634,
+  "pp512_tps": 100.46,
+  "tg128_tps": 28.98
+ }
+]

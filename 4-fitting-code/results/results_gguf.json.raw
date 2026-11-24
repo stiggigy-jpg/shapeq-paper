@@ -1,0 +1,67 @@
+{"model":"smollm","quant":"f16","size_mb":259,"bench":"build: 5297534 (1)"}
+{"model":"smollm","quant":"Q2_K","size_mb":85,"bench":"build: 5297534 (1)"}
+{"model":"smollm","quant":"Q3_K_M","size_mb":90,"bench":"build: 5297534 (1)"}
+{"model":"smollm","quant":"Q4_0","size_mb":88,"bench":"build: 5297534 (1)"}
+{"model":"smollm","quant":"Q4_K_M","size_mb":101,"bench":"build: 5297534 (1)"}
+{"model":"smollm","quant":"IQ4_NL","size_mb":88,"bench":"build: 5297534 (1)"}
+{"model":"smollm","quant":"Q8_0","size_mb":139,"bench":"build: 5297534 (1)"}
+{"model":"smollm","quant":"f16","wiki2_ppl":""}
+{"model":"smollm","quant":"IQ4_NL","wiki2_ppl":"20.4282"}
+{"model":"smollm","quant":"Q2_K","wiki2_ppl":"23.5349"}
+{"model":"smollm","quant":"Q3_K_M","wiki2_ppl":"20.7919"}
+{"model":"smollm","quant":"Q4_0","wiki2_ppl":"21.6431"}
+{"model":"smollm","quant":"Q4_K_M","wiki2_ppl":"19.0627"}
+{"model":"smollm","quant":"Q8_0","wiki2_ppl":"18.1808"}
+{"model":"smollm","quant":"f16","wiki2_ppl":"18.1178"}
+{"model":"qwen05b","quant":"f16","size_mb":994}
+{"model":"qwen05b","quant":"Q2_K","size_mb":338}
+{"model":"qwen05b","quant":"Q3_K_M","size_mb":355}
+{"model":"qwen05b","quant":"Q4_0","size_mb":352}
+{"model":"qwen05b","quant":"Q4_K_M","size_mb":397}
+{"model":"qwen05b","quant":"IQ4_NL","size_mb":354}
+{"model":"qwen05b","quant":"Q8_0","size_mb":531}
+{"model":"qwen05b","quant":"IQ4_NL","wiki2_ppl":"15.1661"}
+{"model":"qwen05b","quant":"Q2_K","wiki2_ppl":"16.9120"}
+{"model":"qwen05b","quant":"Q3_K_M","wiki2_ppl":"15.2571"}
+{"model":"qwen05b","quant":"Q4_0","wiki2_ppl":"15.9323"}
+{"model":"qwen05b","quant":"Q4_K_M","wiki2_ppl":"14.5072"}
+{"model":"qwen05b","quant":"Q8_0","wiki2_ppl":"14.1235"}
+{"model":"qwen05b","quant":"f16","wiki2_ppl":"14.0927"}
+{"model":"qwen05b","quant":"IQ4_NL","pp512_tps":113.46,"tg128_tps":10.23}
+{"model":"qwen05b","quant":"Q2_K","pp512_tps":100.57,"tg128_tps":6.32}
+{"model":"qwen05b","quant":"Q3_K_M","pp512_tps":108.40,"tg128_tps":10.53}
+{"model":"qwen05b","quant":"Q4_0","pp512_tps":109.00,"tg128_tps":9.24}
+{"model":"qwen05b","quant":"Q4_K_M","pp512_tps":52.15,"tg128_tps":9.49}
+{"model":"qwen05b","quant":"Q8_0","pp512_tps":70.90,"tg128_tps":5.61}
+{"model":"qwen05b","quant":"f16","pp512_tps":55.90,"tg128_tps":4.22}
+{"model": "smollm", "quant": "Q2_K+imat", "size_mb": 88, "wiki2_ppl": 21.1205}
+{"model": "smollm", "quant": "Q3_K_M+imat", "size_mb": 93, "wiki2_ppl": 19.3727}
+{"model": "smollm", "quant": "Q4_K_S+imat", "size_mb": 102, "wiki2_ppl": 18.8671}
+{"model": "smollm", "quant": "Q4_K_M+imat", "size_mb": 105, "wiki2_ppl": 18.7393}
+{"model": "qwen05b", "quant": "Q2_K+imat", "size_mb": 338, "wiki2_ppl": 16.3996}
+{"model": "qwen05b", "quant": "Q3_K_M+imat", "size_mb": 355, "wiki2_ppl": 14.9269}
+{"model": "qwen05b", "quant": "Q4_K_S+imat", "size_mb": 385, "wiki2_ppl": 14.4414}
+{"model": "qwen05b", "quant": "Q4_K_M+imat", "size_mb": 397, "wiki2_ppl": 14.3634}
+{"model": "qwen05b", "quant": "IQ4_NL", "pp512_tps": 220.24, "tg128_tps": 35.21}
+{"model": "qwen05b", "quant": "Q2_K+imat", "pp512_tps": 240.67, "tg128_tps": 33.43}
+{"model": "qwen05b", "quant": "Q2_K", "pp512_tps": 230.83, "tg128_tps": 37.00}
+{"model": "qwen05b", "quant": "Q3_K_M+imat", "pp512_tps": 216.88, "tg128_tps": 36.11}
+{"model": "qwen05b", "quant": "Q3_K_M", "pp512_tps": 166.03, "tg128_tps": 25.87}
+{"model": "qwen05b", "quant": "Q4_0", "pp512_tps": 201.80, "tg128_tps": 37.54}
+{"model": "qwen05b", "quant": "Q4_K_M+imat", "pp512_tps": 100.46, "tg128_tps": 28.98}
+{"model": "qwen05b", "quant": "Q4_K_M", "pp512_tps": 98.17, "tg128_tps": 28.57}
+{"model": "qwen05b", "quant": "Q4_K_S+imat", "pp512_tps": 96.92, "tg128_tps": 31.20}
+{"model": "qwen05b", "quant": "Q8_0", "pp512_tps": 112.84, "tg128_tps": 27.96}
+{"model": "qwen05b", "quant": "f16", "pp512_tps": 91.72, "tg128_tps": 13.41}
+{"model": "smollm", "quant": "IQ4_NL", "pp512_tps": 565.12, "tg128_tps": 97.56}
+{"model": "smollm", "quant": "Q2_K+imat", "pp512_tps": 561.19, "tg128_tps": 112.28}
+{"model": "smollm", "quant": "Q2_K", "pp512_tps": 577.21, "tg128_tps": 129.13}
+{"model": "smollm", "quant": "Q3_K_M+imat", "pp512_tps": 476.26, "tg128_tps": 110.37}
+{"model": "smollm", "quant": "Q3_K_M", "pp512_tps": 495.90, "tg128_tps": 111.32}
+{"model": "smollm", "quant": "Q4_0", "pp512_tps": 532.72, "tg128_tps": 104.75}
+{"model": "smollm", "quant": "Q4_K_M+imat", "pp512_tps": 265.28, "tg128_tps": 83.34}
+{"model": "smollm", "quant": "Q4_K_M", "pp512_tps": 268.98, "tg128_tps": 98.57}
+{"model": "smollm", "quant": "Q4_K_S+imat", "pp512_tps": 276.36, "tg128_tps": 108.02}
+{"model": "smollm", "quant": "Q8_0", "pp512_tps": 352.68, "tg128_tps": 87.19}
+{"model": "smollm", "quant": "f16", "pp512_tps": 321.66, "tg128_tps": 50.70}
+{"model": "smollm", "quant": "q4lut", "pp512_tps": 229.18, "tg128_tps": 53.69}

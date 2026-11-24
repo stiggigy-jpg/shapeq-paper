@@ -1,0 +1,8 @@
+Paper and tabulated results: Creative Commons Attribution 4.0 International (CC BY 4.0).
+https://creativecommons.org/licenses/by/4.0/
+
+Copyright (c) 2026 Roman S. Pokora.
+
+Code in 4-fitting-code/ and pack_q4lut.py: MIT License, see 4-fitting-code/LICENSE.
+GGUF weights and fitted packs: Apache-2.0, inherited from SmolLM-135M and
+Qwen2.5-0.5B; see the model repository.
