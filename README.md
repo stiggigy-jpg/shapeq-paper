@@ -1,6 +1,6 @@
 # SHAPEQ — shape-adaptive quantization
 
-**Author:** Roman S. Pokora · Independent researcher. Preprint, November 2026.
+**Author:** Roman S. Pokora · Independent researcher · ORCID 0009-0007-4468-5266. Preprint, November 2026.
 
 Paper (HTML): https://stiggigy-jpg.github.io/shapeq-paper/ ·
 Runtime fork: https://github.com/stiggigy-jpg/shapeq-q4lut ·
