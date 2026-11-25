@@ -2,6 +2,7 @@
 
 **Author:** Roman S. Pokora · Independent researcher · ORCID 0009-0007-4468-5266. Preprint, November 2026.
 
+DOI: https://doi.org/10.5281/zenodo.24517963 · Preprint: https://zenodo.org/records/24517963 ·
 Paper (HTML): https://stiggigy-jpg.github.io/shapeq-paper/ ·
 Runtime fork: https://github.com/stiggigy-jpg/shapeq-q4lut ·
 Fitted GGUFs and packs: https://huggingface.co/RomanPokora/shapeq-q4lut-models
